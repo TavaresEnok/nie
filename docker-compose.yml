@@ -1,0 +1,51 @@
+name: nie
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: nie
+      POSTGRES_PASSWORD: ${NIE_DB_PASSWORD:-nie}
+      POSTGRES_DB: nie
+    # Exposto apenas no loopback para inspeção local; remova se não precisar.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # PostgreSQL 18+ usa /var/lib/postgresql como mount único.
+      - nie_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nie -d nie"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NIE_DATABASE_URL: postgres://nie:${NIE_DB_PASSWORD:-nie}@postgres:5432/nie?sslmode=disable
+      NIE_ADDR: 0.0.0.0:8080
+      NIE_DATA_DIR: /data
+      NIE_WORKER: "true"
+      NIE_WORKERS: ${NIE_WORKERS:-2}
+      NIE_POLL_INTERVAL: ${NIE_POLL_INTERVAL:-2s}
+      NIE_REQUEST_TIMEOUT: ${NIE_REQUEST_TIMEOUT:-30s}
+      NIE_SEARXNG_URL: ${NIE_SEARXNG_URL:-}
+      NIE_GITHUB_ENABLED: ${NIE_GITHUB_ENABLED:-false}
+      NIE_GITHUB_TOKEN: ${NIE_GITHUB_TOKEN:-}
+      NIE_API_TOKEN: ${NIE_API_TOKEN:-}
+      NIE_LOG_LEVEL: ${NIE_LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - nie_data:/data
+    restart: unless-stopped
+
+volumes:
+  nie_pgdata:
+  nie_data:

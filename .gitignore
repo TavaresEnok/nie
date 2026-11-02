@@ -1,0 +1,23 @@
+# Build e runtime
+/data/
+/bin/
+*.exe
+*.test
+*.out
+
+# Frontend
+web/node_modules/
+web/dist/
+internal/webui/dist/*
+!internal/webui/dist/index.html
+
+# Ambiente e segredos
+.env
+.env.*
+!.env.example
+
+# Editor/SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

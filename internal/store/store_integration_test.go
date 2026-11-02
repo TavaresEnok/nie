@@ -1,0 +1,316 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"nie/internal/domain"
+)
+
+// TestStoreIntegration valida migrações, campanha, documento, busca e fila
+// contra um PostgreSQL real. Execute com NIE_TEST_DATABASE_URL definido.
+func TestStoreIntegration(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("NIE_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("NIE_TEST_DATABASE_URL não definido")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	st, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	budget := domain.Budget{
+		MaxDepth:                 3,
+		MaxURLs:                  10,
+		MaxDomains:               5,
+		MaxBytes:                 10 << 20,
+		MinDomainIntervalSeconds: 1,
+	}
+	campaign, err := st.CreateCampaign(ctx, "teste de integração "+suffix, []string{"https://example.org/doc?utm_source=test"}, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = st.Pool().Exec(cleanupCtx, `DELETE FROM campaigns WHERE id=$1::uuid`, campaign.ID)
+		_, _ = st.Pool().Exec(cleanupCtx, `DELETE FROM documents WHERE sha256=$1 OR sha256=$2`, hashFor("one-"+suffix), hashFor("two-"+suffix))
+		_, _ = st.Pool().Exec(cleanupCtx, `DELETE FROM domain_state WHERE domain=$1`, "throttle-"+suffix+".example")
+	})
+	if len(campaign.SeedURLs) != 1 || campaign.SeedURLs[0] != "https://example.org/doc" {
+		t.Fatalf("seeds normalizadas = %v", campaign.SeedURLs)
+	}
+	if campaign.Stats.JobsPending != 1 {
+		t.Errorf("jobs pendentes = %d, quer 1", campaign.Stats.JobsPending)
+	}
+	if campaign.Stats.Passages != 0 {
+		t.Errorf("trechos iniciais = %d, quer 0", campaign.Stats.Passages)
+	}
+
+	doc1, created, err := st.RecordDocument(ctx, DocumentRecord{
+		SHA256:        hashFor("one-" + suffix),
+		MIME:          "text/plain",
+		Title:         "BGP Guide",
+		Size:          128,
+		Text:          "Use display bgp peer para verificar as sessões. Rota: ip route 10.0.0.0/8.",
+		Metadata:      map[string]any{"source": "test"},
+		CampaignID:    campaign.ID,
+		URL:           "https://example.org/doc",
+		NormalizedURL: "https://example.org/doc",
+		Domain:        "example.org",
+		StatusCode:    200,
+		Passages: []domain.Passage{
+			{Ordinal: 0, Text: "Use display bgp peer para verificar as sessões. Rota: ip route 10.0.0.0/8."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("primeiro documento deveria ser criado")
+	}
+
+	doc2, created, err := st.RecordDocument(ctx, DocumentRecord{
+		SHA256:        hashFor("two-" + suffix),
+		MIME:          "text/plain",
+		Title:         "Sessões",
+		Size:          32,
+		Text:          "verificar sessões bgp",
+		CampaignID:    campaign.ID,
+		URL:           "https://example.org/outro",
+		NormalizedURL: "https://example.org/outro",
+		Domain:        "example.org",
+		StatusCode:    200,
+		Passages: []domain.Passage{
+			{Ordinal: 0, Text: "verificar sessões bgp"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("segundo documento deveria ser criado")
+	}
+
+	exact, err := st.Search(ctx, "display bgp peer", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(exact, doc1, "exact") {
+		t.Fatalf("busca exata não encontrou o documento: %+v", exact)
+	}
+	if !strings.Contains(exact[0].Snippet, "<mark>") {
+		t.Errorf("snippet sem destaque: %q", exact[0].Snippet)
+	}
+	route, err := st.Search(ctx, "ip route 10.0.0.0/8", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(route, doc1, "exact") {
+		t.Fatalf("busca exata com símbolos não encontrou o documento: %+v", route)
+	}
+
+	fts, err := st.Search(ctx, "display sessões", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(fts, doc1, "fts") {
+		t.Fatalf("busca FTS não encontrou documento com os dois tokens: %+v", fts)
+	}
+
+	fuzzy, err := st.Search(ctx, "verifcar sessoe", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasResult(fuzzy, doc2, "fuzzy") {
+		t.Fatalf("busca aproximada não encontrou o documento: %+v", fuzzy)
+	}
+
+	detail, err := st.GetDocument(ctx, doc1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Passages) != 1 || detail.Passages[0].Text == "" {
+		t.Fatalf("trechos do documento = %+v", detail.Passages)
+	}
+	if len(detail.Versions) != 1 || detail.Versions[0].CampaignID != campaign.ID {
+		t.Fatalf("versões do documento = %+v", detail.Versions)
+	}
+	docs, err := st.ListDocuments(ctx, 20, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Errorf("documentos da campanha = %d, quer 2", len(docs))
+	}
+
+	fresh, err := st.GetCampaign(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Stats.Documents != 2 || fresh.Stats.Passages != 2 {
+		t.Errorf("estatísticas da campanha = %+v", fresh.Stats)
+	}
+
+	ok, err := st.EnqueueFetch(ctx, campaign.ID, "https://example.org/outra?utm_campaign=x", 1, "https://example.org/doc", "link", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("nova URL deveria ser enfileirada")
+	}
+	ok, err = st.EnqueueFetch(ctx, campaign.ID, "https://example.org/outra", 2, "https://example.org/doc", "link", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("URL duplicada não deveria ser enfileirada")
+	}
+	jobs, err := st.ListJobs(ctx, campaign.ID, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) < 2 {
+		t.Errorf("jobs da campanha = %d, quer >= 2", len(jobs))
+	}
+	edges, err := st.ListEdges(ctx, campaign.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(edges) == 0 {
+		t.Error("aresta de descoberta não registrada")
+	}
+
+	if err := st.SetCampaignStatus(ctx, campaign.ID, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := st.GetCampaign(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.Status != "paused" {
+		t.Errorf("status = %q, quer paused", paused.Status)
+	}
+	if err := st.SetCampaignStatus(ctx, campaign.ID, "running"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Jobs running com lease expirado devem voltar a ser elegíveis.
+	if err := st.SetCampaignStatus(ctx, campaign.ID, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	leaseCampaign, err := st.CreateCampaign(ctx, "teste de lease "+suffix, []string{"https://lease.example/doc"}, domain.Budget{
+		MaxDepth: 1, MaxURLs: 1, MaxDomains: 1, MaxBytes: 1 << 20, MinDomainIntervalSeconds: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = st.Pool().Exec(cleanupCtx, `DELETE FROM campaigns WHERE id=$1::uuid`, leaseCampaign.ID)
+	})
+	firstClaim, err := st.ClaimJob(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstClaim == nil || firstClaim.CampaignID != leaseCampaign.ID {
+		t.Fatalf("claim inicial inesperado: %+v", firstClaim)
+	}
+	if _, err := st.Pool().Exec(ctx, `UPDATE jobs SET lease_until=now()-interval '1 minute' WHERE id=$1`, firstClaim.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondClaim, err := st.ClaimJob(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondClaim == nil || secondClaim.ID != firstClaim.ID {
+		t.Fatalf("job com lease expirado não foi reivindicado: %+v", secondClaim)
+	}
+	if secondClaim.Attempts != firstClaim.Attempts+1 {
+		t.Errorf("attempts = %d, quer %d", secondClaim.Attempts, firstClaim.Attempts+1)
+	}
+	if err := st.CompleteJob(ctx, secondClaim.ID); err != nil {
+		t.Fatal(err)
+	}
+	var deadID int64
+	if err := st.Pool().QueryRow(ctx, `
+		INSERT INTO jobs(campaign_id, kind, status, attempts, max_attempts, lease_until)
+		VALUES($1::uuid, 'fetch', 'running', 3, 3, now()-interval '1 minute')
+		RETURNING id`, leaseCampaign.ID).Scan(&deadID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.ReapExpiredJobs(ctx); err != nil {
+		t.Fatal(err)
+	} else if n < 1 {
+		t.Error("reaper deveria encerrar ao menos um job")
+	}
+	var deadStatus string
+	if err := st.Pool().QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, deadID).Scan(&deadStatus); err != nil {
+		t.Fatal(err)
+	}
+	if deadStatus != "dead" {
+		t.Errorf("status do job expirado = %q, quer dead", deadStatus)
+	}
+	if _, err := st.FinishIdleCampaigns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	leaseFresh, err := st.GetCampaign(ctx, leaseCampaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseFresh.Status != "completed" {
+		t.Errorf("campanha ociosa = %q, quer completed", leaseFresh.Status)
+	}
+
+	next, allowed, err := st.Throttle(ctx, "throttle-"+suffix+".example", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed || next.IsZero() {
+		t.Fatal("primeiro acesso ao domínio deveria ser permitido")
+	}
+	_, allowed, err = st.Throttle(ctx, "throttle-"+suffix+".example", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("segundo acesso imediato deveria ser adiado")
+	}
+
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Campaigns < 1 || stats.Documents < 2 || stats.Passages < 2 {
+		t.Errorf("estatísticas globais inesperadas: %+v", stats)
+	}
+}
+
+func hasResult(items []domain.SearchResult, documentID, match string) bool {
+	for _, item := range items {
+		if item.DocumentID == documentID && item.Match == match {
+			return true
+		}
+	}
+	return false
+}
+
+func hashFor(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
