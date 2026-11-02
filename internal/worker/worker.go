@@ -355,7 +355,9 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 			ex, err = extract.Text(rawBytes)
 		}
 		if err != nil {
-			return &jobError{err: err, permanent: true}
+			// O original válido não se perde por falha de extração (ex.: PDF
+			// escaneado ou protegido): fica no CAS para reprocessamento.
+			return w.preserveUnextracted(ctx, job, norm, finalNorm, rawBytes, fetchResult, err.Error())
 		}
 	}
 
@@ -363,8 +365,8 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		ex.Text = fetchResult.Text
 	}
 	if strings.TrimSpace(ex.Text) == "" {
-		w.logger.Info("sem texto extraído", "url", finalNorm)
-		return nil
+		return w.preserveUnextracted(ctx, job, norm, finalNorm, rawBytes, fetchResult,
+			"nenhum texto extraível (possível documento escaneado; OCR pendente)")
 	}
 
 	stored, err := w.storage.Put(rawBytes)
@@ -575,6 +577,44 @@ func (w *Worker) processSoftwareHeritage(ctx context.Context, job *domain.Job) e
 		}
 	}
 	w.logger.Info("descoberta Software Heritage concluída", "query", query, "results", len(results), "enqueued", enqueued)
+	return nil
+}
+
+// preserveUnextracted arquiva o documento original no CAS e registra um
+// documento sem texto, marcado como extraction_pending, quando a extração falha
+// ou não produz texto. O original e seu SHA-256 ficam disponíveis para um
+// reprocessamento futuro (OCR/Docling) sem nova coleta.
+func (w *Worker) preserveUnextracted(ctx context.Context, job *domain.Job, requested, final string, raw []byte, fr *domain.FetchResult, reason string) error {
+	stored, err := w.storage.Put(raw)
+	if err != nil {
+		return err
+	}
+	mime := strings.TrimSpace(strings.SplitN(fr.ContentType, ";", 2)[0])
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	if _, _, err := w.store.RecordDocument(ctx, store.DocumentRecord{
+		SHA256: stored.SHA256,
+		MIME:   mime,
+		Size:   stored.Size,
+		Metadata: map[string]any{
+			"requested_url":     requested,
+			"final_url":         final,
+			"executor":          fr.Metadata["executor"],
+			"extraction_status": "pending",
+			"extraction_reason": reason,
+		},
+		CampaignID:    job.CampaignID,
+		URL:           final,
+		NormalizedURL: final,
+		Domain:        urlutil.Domain(final),
+		StatusCode:    fr.StatusCode,
+		ETag:          fr.ETag,
+		LastModified:  fr.LastModified,
+	}); err != nil {
+		return err
+	}
+	w.logger.Warn("documento preservado sem texto extraído", "url", final, "sha256", stored.SHA256, "motivo", reason)
 	return nil
 }
 

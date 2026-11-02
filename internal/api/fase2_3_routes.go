@@ -118,7 +118,7 @@ func registerFase2and3(api huma.API, s *Server) {
 		}
 
 		// Buscar passagens da campanha para evidência
-		passages, err := s.store.Search(ctx, camp.Query, camp.ID, 100)
+		passages, err := retrievePassages(ctx, s.store, camp.Query, camp.ID, 100)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("erro ao recuperar passagens: " + err.Error())
 		}

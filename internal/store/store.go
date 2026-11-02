@@ -309,7 +309,7 @@ func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, dep
 	var used, domains int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)::int, count(DISTINCT domain) FILTER (WHERE domain <> '')::int
-		FROM jobs WHERE campaign_id=$1::uuid`, campaignID).Scan(&used, &domains); err != nil {
+		FROM jobs WHERE campaign_id=$1::uuid AND kind='fetch'`, campaignID).Scan(&used, &domains); err != nil {
 		return false, err
 	}
 	if used >= maxURLs {
@@ -336,9 +336,9 @@ func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, dep
 	if parentURL != "" {
 		_, _ = tx.Exec(ctx, `
 			INSERT INTO discovery_edges(campaign_id, from_url, to_url, to_domain, kind, depth, reason)
-			VALUES($1::uuid, $2, $3, $4, 'link', $5, $6)
+			VALUES($1::uuid, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (campaign_id, from_url, to_url, kind) DO NOTHING`,
-			campaignID, parentURL, norm, domainName, depth, reason)
+			campaignID, parentURL, norm, domainName, edgeKind(reason), depth, reason)
 	}
 	if status == "completed" {
 		_, _ = tx.Exec(ctx, `UPDATE campaigns SET status='running', updated_at=now(), finished_at=NULL WHERE id=$1::uuid`, campaignID)
@@ -347,6 +347,16 @@ func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, dep
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// edgeKind converte o motivo do enfileiramento no tipo da aresta de descoberta,
+// preservando "sitemap" e "feed"; qualquer outro motivo vira "link".
+func edgeKind(reason string) string {
+	switch reason {
+	case "sitemap", "feed":
+		return reason
+	}
+	return "link"
 }
 
 func (s *Store) RecordDiscoveryEdge(ctx context.Context, campaignID, fromURL, toURL, kind, reason string, depth int) error {
@@ -359,9 +369,27 @@ func (s *Store) RecordDiscoveryEdge(ctx context.Context, campaignID, fromURL, to
 	return err
 }
 
+// MaxDiscoveryJobsPerCampaign limita as pesquisas externas (SearXNG, Mwmbl,
+// GitHub, Software Heritage) de uma campanha. Elas não consomem o orçamento de
+// URLs (max_urls), que conta apenas downloads (jobs "fetch").
+const MaxDiscoveryJobsPerCampaign = 50
+
+// NormalizeQuery canoniza uma consulta para deduplicação: minúsculas e espaços
+// colapsados.
+func NormalizeQuery(q string) string {
+	return strings.Join(strings.Fields(strings.ToLower(q)), " ")
+}
+
+// EnqueueDiscovery agenda uma pesquisa externa. É idempotente por
+// campanha+tipo+consulta normalizada (a mesma consulta nunca roda duas vezes) e
+// reabre a campanha se ela já estava concluída, para que o worker a execute.
 func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query string) (bool, error) {
 	if kind != "discover_web" && kind != "discover_github" && kind != "discover_mwmbl" && kind != "discover_swh" {
 		return false, fmt.Errorf("kind de descoberta inválido")
+	}
+	norm := NormalizeQuery(query)
+	if norm == "" {
+		return false, nil
 	}
 	payload, _ := json.Marshal(map[string]string{"query": query})
 	tx, err := s.pool.Begin(ctx)
@@ -369,8 +397,8 @@ func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query st
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	var maxURLs int
-	err = tx.QueryRow(ctx, `SELECT max_urls FROM campaigns WHERE id=$1::uuid FOR UPDATE`, campaignID).Scan(&maxURLs)
+	var status string
+	err = tx.QueryRow(ctx, `SELECT status FROM campaigns WHERE id=$1::uuid FOR UPDATE`, campaignID).Scan(&status)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, ErrNotFound
@@ -378,22 +406,29 @@ func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query st
 		return false, err
 	}
 	var used int
-	if err := tx.QueryRow(ctx, `SELECT count(*)::int FROM jobs WHERE campaign_id=$1::uuid`, campaignID).Scan(&used); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*)::int FROM jobs WHERE campaign_id=$1::uuid AND kind <> 'fetch'`, campaignID).Scan(&used); err != nil {
 		return false, err
 	}
-	if used >= maxURLs {
+	if used >= MaxDiscoveryJobsPerCampaign {
 		return false, nil
 	}
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO jobs(campaign_id, kind, payload, priority, reason)
-		VALUES($1::uuid, $2, $3, 5, $2)`, campaignID, kind, payload)
+		INSERT INTO jobs(campaign_id, kind, url_hash, payload, priority, reason)
+		VALUES($1::uuid, $2, $3, $4, 5, $2)
+		ON CONFLICT DO NOTHING`, campaignID, kind, urlutil.Hash(kind+"|"+norm), payload)
 	if err != nil {
 		return false, err
+	}
+	inserted := tag.RowsAffected() > 0
+	if inserted && status == "completed" {
+		if _, err := tx.Exec(ctx, `UPDATE campaigns SET status='running', updated_at=now(), finished_at=NULL WHERE id=$1::uuid`, campaignID); err != nil {
+			return false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() > 0, nil
+	return inserted, nil
 }
 
 func (s *Store) ClaimJob(ctx context.Context, lease time.Duration) (*domain.Job, error) {

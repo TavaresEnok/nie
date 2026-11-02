@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 
 	"nie/internal/domain"
 )
@@ -28,6 +31,14 @@ func (s *Store) ListVendors(ctx context.Context) ([]domain.Vendor, error) {
 	return out, rows.Err()
 }
 
+// SaveClaims grava o resultado de uma investigação de forma idempotente:
+//   - claims são identificados por (campanha, título); reexecutar /investigate
+//     atualiza o claim existente e substitui suas evidências, sem duplicar;
+//   - claims não reproduzidos e ainda "untested" são removidos; os que já têm
+//     validação operacional (lab_validated/failed) nunca são apagados;
+//   - cada fingerprint de origem vira uma linha de origin_clusters e as
+//     evidências gravam cluster_id, de modo que a independência sobrevive ao
+//     recarregamento do banco.
 func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -35,32 +46,111 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	campaigns := make(map[string][]string) // campanha -> IDs de claims mantidos
+	clusters := make(map[string]string)    // campanha|fingerprint -> UUID
+	touched := make(map[string]bool)       // UUIDs de clusters usados
+
 	for _, c := range claims {
 		var claimID string
 		err := tx.QueryRow(ctx, `
-			INSERT INTO claims (campaign_id, title, statement, status, applicability, operational_validation)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id::text`,
-			c.CampaignID, c.Title, c.Statement, c.Status, c.Applicability, c.OperationalValidation).Scan(&claimID)
-		if err != nil {
-			return fmt.Errorf("inserir claim: %w", err)
+			SELECT id::text FROM claims WHERE campaign_id=$1::uuid AND title=$2
+			ORDER BY created_at ASC LIMIT 1 FOR UPDATE`, c.CampaignID, c.Title).Scan(&claimID)
+		switch {
+		case err == nil:
+			if _, err := tx.Exec(ctx, `
+				UPDATE claims SET statement=$2, status=$3, applicability=$4, updated_at=now()
+				WHERE id=$1::uuid`, claimID, c.Statement, c.Status, c.Applicability); err != nil {
+				return fmt.Errorf("atualizar claim: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM evidence WHERE claim_id=$1::uuid`, claimID); err != nil {
+				return fmt.Errorf("limpar evidências do claim: %w", err)
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO claims (campaign_id, title, statement, status, applicability, operational_validation)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				RETURNING id::text`,
+				c.CampaignID, c.Title, c.Statement, c.Status, c.Applicability, c.OperationalValidation).Scan(&claimID); err != nil {
+				return fmt.Errorf("inserir claim: %w", err)
+			}
+		default:
+			return fmt.Errorf("buscar claim existente: %w", err)
 		}
+		campaigns[c.CampaignID] = append(campaigns[c.CampaignID], claimID)
 
 		for _, ev := range c.Evidences {
+			var clusterID *string
+			if ev.ClusterID != nil && *ev.ClusterID != "" {
+				key := c.CampaignID + "|" + *ev.ClusterID
+				id, ok := clusters[key]
+				if !ok {
+					id, err = recordOriginClusterTx(ctx, tx, c.CampaignID, *ev.ClusterID, ev.DocumentID)
+					if err != nil {
+						return err
+					}
+					clusters[key] = id
+				}
+				touched[id] = true
+				clusterID = &id
+			}
 			_, err = tx.Exec(ctx, `
 				INSERT INTO evidence (
-					claim_id, document_id, passage_id, stance, excerpt, page, confidence, is_official_doc, notes,
+					claim_id, document_id, passage_id, cluster_id, stance, excerpt, page, confidence, is_official_doc, notes,
 					vendor_match, model_match, firmware_match, feature_match, mode_match, prerequisites_match, source_span, validation_run_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-				claimID, ev.DocumentID, ev.PassageID, ev.Stance, ev.Excerpt, ev.Page, ev.Confidence, ev.IsOfficialDoc, ev.Notes,
+				VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+				claimID, ev.DocumentID, ev.PassageID, clusterID, ev.Stance, ev.Excerpt, ev.Page, ev.Confidence, ev.IsOfficialDoc, ev.Notes,
 				ev.VendorMatch, ev.ModelMatch, ev.FirmwareMatch, ev.FeatureMatch, ev.ModeMatch, ev.PrerequisitesMatch, ev.SourceSpan, ev.ValidationRunID)
 			if err != nil {
 				return fmt.Errorf("inserir evidence: %w", err)
 			}
 		}
 	}
+
+	for campaignID, keep := range campaigns {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM claims
+			WHERE campaign_id=$1::uuid AND operational_validation='untested' AND id <> ALL($2::uuid[])`,
+			campaignID, keep); err != nil {
+			return fmt.Errorf("remover claims obsoletos: %w", err)
+		}
+	}
+	if len(touched) > 0 {
+		ids := make([]string, 0, len(touched))
+		for id := range touched {
+			ids = append(ids, id)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE origin_clusters oc SET duplicate_count = GREATEST(sub.n, 1)
+			FROM (SELECT cluster_id, count(DISTINCT document_id) AS n FROM evidence
+			      WHERE cluster_id = ANY($1::uuid[]) GROUP BY cluster_id) sub
+			WHERE oc.id = sub.cluster_id`, ids); err != nil {
+			return fmt.Errorf("atualizar contagem de réplicas: %w", err)
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+// recordOriginClusterTx cria (ou reaproveita) o cluster de origem de um
+// fingerprint. A origem canônica é o primeiro documento visto na campanha.
+func recordOriginClusterTx(ctx context.Context, tx pgx.Tx, campaignID, fingerprint, documentID string) (string, error) {
+	var rootDomain, canonicalURL string
+	err := tx.QueryRow(ctx, `
+		SELECT domain, url FROM document_versions
+		WHERE document_id=$1::uuid AND campaign_id=$2::uuid
+		ORDER BY fetched_at ASC LIMIT 1`, documentID, campaignID).Scan(&rootDomain, &canonicalURL)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("buscar origem do documento: %w", err)
+	}
+	var id string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO origin_clusters (campaign_id, fingerprint, root_domain, canonical_url, duplicate_count)
+		VALUES ($1::uuid, $2, $3, $4, 1)
+		ON CONFLICT (campaign_id, fingerprint) DO UPDATE SET fingerprint = origin_clusters.fingerprint
+		RETURNING id::text`, campaignID, fingerprint, rootDomain, canonicalURL).Scan(&id); err != nil {
+		return "", fmt.Errorf("gravar origin cluster: %w", err)
+	}
+	return id, nil
 }
 
 func (s *Store) ListClaimsByCampaign(ctx context.Context, campaignID string) ([]domain.Claim, error) {

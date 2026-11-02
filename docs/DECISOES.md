@@ -121,3 +121,39 @@ adicional, nunca como condição para a descoberta.
 **Consequências:** um benchmark fora de telecom deve integrar a validação de
 ponta a ponta. Tornar os requisitos do motor de evidências configuráveis por
 domínio é trabalho pendente.
+
+## ADR-010 — O PostgreSQL manda na fila; executores só coletam
+
+**Status:** aceito  
+**Contexto:** a fila persistente, a fronteira de URLs, a dedupe e os orçamentos
+já vivem no PostgreSQL. Usar também o scheduler do Scrapy criaria duas
+estruturas concorrentes de prioridade, deduplicação e recuperação.  
+**Decisão:** o NIE decide o que coletar e em que ordem; Scrapy, Playwright (e
+Crawl4AI, se for integrado) executam uma coleta por tarefa e devolvem dados.
+Aproveitar `LinkExtractor`, `CrawlSpider` ou middlewares do Scrapy é permitido,
+desde que a fronteira continue no PostgreSQL.  
+**Consequências:** o worker Scrapy atual (que usa `requests` e o
+`LinkExtractor`) é coerente com esta decisão. Não se espera migrar para o
+scheduler/`JOBDIR` do Scrapy.
+
+## ADR-011 — Regras de evidência, rodadas e proveniência (auditoria 3)
+
+**Status:** aceito (implementado em 02/11/2026)  
+- **Evidência:** `ResolveClaimStatus` avalia cada evidência isoladamente. Só
+  `supports` sustenta; `mentions` é relevância lexical. `sustained/applicable`
+  exige uma evidência oficial que comprove, ela mesma, fabricante, modelo,
+  firmware e recurso. Duas origens independentes com escopo comprovado dão
+  `corroborated/applicable`. Um trecho que apenas lista os termos não afirma
+  nada e vira `mentions`.
+- **Rodadas:** `EnqueueDiscovery` é idempotente por campanha+provedor+consulta
+  normalizada e reabre a campanha concluída; pesquisas externas têm teto próprio
+  e não consomem `max_urls`.
+- **Persistência:** claims são upsert por (campanha, título); `origin_clusters`
+  e `cluster_id` são gravados na mesma transação.
+- **Proveniência Git:** um SHA só é citado se o trecho existe no blob daquele
+  commit; o resto é `working_tree`.
+- **Originais:** o documento é arquivado no CAS antes de qualquer extração; sem
+  texto, fica `extraction_pending`.  
+**Limites conhecidos:** a classificação ainda é lexical; o ciclo adaptativo
+continua manual; PostgreSQL 18, navegador real, isolamento de rede dos workers,
+backup/restauração e a campanha de ponta a ponta continuam sem prova.

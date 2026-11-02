@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"nie/internal/classifier"
@@ -122,103 +123,106 @@ func ParseRequirements(query string) TargetRequirements {
 	return req
 }
 
-// ResolveClaimStatus avalia o status epistemológico e a aplicabilidade de uma claim com base nas evidências.
-// Atende estritamente ao P0-01:
-// - Substitui inferência por notas por campos estruturados e critérios de verificação independentes.
-// - NUNCA promove a applicable/sustained sem que vendor, modelo, firmware e features solicitadas sejam comprovados.
-// - Componente que não foi comprovado permanece desconhecido, nunca true.
-// - Três cópias do mesmo artigo contam como 1 único cluster de origem.
-// - Separa "documented" (manual oficial sem comprovação de versão), "corroborated" (múltiplas origens),
-//   "applicable" (corroborado + condições confirmadas) e "contested" / "incompatible" (refutado/conflito).
+// ResolveClaimStatus avalia o status epistemológico e a aplicabilidade de uma claim.
+//
+// Regras (cada evidência é avaliada isoladamente; flags de evidências diferentes
+// nunca são combinadas):
+//   - Só evidências com Stance "supports" sustentam ou corroboram. "mentions" é
+//     recuperação lexical, não prova, e nunca conta como origem.
+//   - Uma evidência está "escopada" quando ela mesma comprova fabricante, modelo,
+//     firmware e recurso (campos estruturados; notas de texto são ignoradas).
+//   - sustained/applicable: uma evidência oficial que é, ela própria, escopada.
+//   - corroborated/applicable: >= 2 origens independentes, cada uma com
+//     evidência escopada (a origem oficial escopada já basta pela regra acima).
+//   - corroborated/indeterminate: >= 2 origens independentes que sustentam, mas
+//     sem escopo comprovado.
+//   - documented/indeterminate: há documento oficial que sustenta, sem escopo.
+//   - contested/incompatible: há evidência que refuta.
+//   - unconfirmed/indeterminate: o restante, inclusive só menções.
+//
+// Três cópias do mesmo texto são uma única origem (ClusterTracker).
 func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evidence) {
+	claim.Status = "unconfirmed"
+	claim.Applicability = "indeterminate"
 	if len(evidences) == 0 {
-		claim.Status = "unconfirmed"
-		claim.Applicability = "indeterminate"
 		return
 	}
 
-	hasOfficial := false
 	hasContradiction := false
-	strictlyVerified := false
+	hasOfficialSupport := false
+	officialScoped := false
 
-	var fingerprints []string
-	var domains []string
+	var supportFP, supportDom []string
+	var scopedFP, scopedDom []string
 
 	for _, ev := range evidences {
-		if ev.Stance == "refutes" {
+		switch ev.Stance {
+		case "refutes":
 			hasContradiction = true
+			continue
+		case "supports":
+		default: // "mentions" e qualquer outro valor: relevante, mas não é prova
+			continue
 		}
-		if ev.IsOfficialDoc && ev.Stance == "supports" {
-			hasOfficial = true
-		}
+
+		fp := ev.ID
 		if ev.ClusterID != nil && *ev.ClusterID != "" {
-			fingerprints = append(fingerprints, *ev.ClusterID)
-		} else {
-			fingerprints = append(fingerprints, ev.ID)
+			fp = *ev.ClusterID
 		}
-		// Extrai domínio das notas se disponível
-		dom := ""
+		dom := ev.ID
 		if strings.HasPrefix(ev.Notes, "Fonte: ") {
-			parts := strings.Split(ev.Notes, " ")
-			if len(parts) >= 2 {
+			if parts := strings.Fields(ev.Notes); len(parts) >= 2 {
 				dom = parts[1]
 			}
 		}
-		if dom == "" {
-			dom = ev.ID
-		}
-		domains = append(domains, dom)
+		supportFP, supportDom = append(supportFP, fp), append(supportDom, dom)
 
-		// P0-01: Verificação técnica estrita baseada exclusivamente em campos estruturados
-		// Requer rigorosamente todos os campos de match estruturados (Vendor, Model, Firmware, Feature).
-		// Notas textuais jamais substituem a ausência de campos estruturados válidos.
-		if ev.Stance == "supports" {
-			if ev.VendorMatch && ev.ModelMatch && ev.FirmwareMatch && ev.FeatureMatch {
-				strictlyVerified = true
+		scoped := ev.VendorMatch && ev.ModelMatch && ev.FirmwareMatch && ev.FeatureMatch
+		if scoped {
+			scopedFP, scopedDom = append(scopedFP, fp), append(scopedDom, dom)
+		}
+		if ev.IsOfficialDoc {
+			hasOfficialSupport = true
+			if scoped {
+				officialScoped = true
 			}
 		}
 	}
 
-	// Calcula quantidade real de origens substantivamente independentes
-	independentOrigins := e.tracker.CountIndependentOrigins(fingerprints, domains)
-	if independentOrigins < 1 && len(evidences) > 0 {
-		independentOrigins = 1
-	}
-
-	// 1. Contradições, depreciação ou conflito explícito
-	if hasContradiction {
+	switch {
+	case hasContradiction:
 		claim.Status = "contested"
 		claim.Applicability = "incompatible"
-		return
-	}
-
-	// 2. Documento oficial
-	if hasOfficial {
-		if strictlyVerified {
-			claim.Status = "sustained"
-			claim.Applicability = "applicable"
-		} else {
-			// Manual legítimo, mas sem validação do procedimento/firmware completo solicitado
-			claim.Status = "documented"
-			claim.Applicability = "indeterminate"
-		}
-		return
-	}
-
-	// 3. Corroboração multi-origem independente (>= 2 origens distintas não-cópia)
-	if independentOrigins >= 2 {
+	case officialScoped:
+		claim.Status = "sustained"
+		claim.Applicability = "applicable"
+	case e.tracker.CountIndependentOrigins(scopedFP, scopedDom) >= 2:
 		claim.Status = "corroborated"
-		if strictlyVerified {
-			claim.Applicability = "applicable"
-		} else {
-			claim.Applicability = "indeterminate"
-		}
-		return
+		claim.Applicability = "applicable"
+	case hasOfficialSupport:
+		// Manual legítimo, sem comprovar o escopo (modelo/firmware/recurso) pedido.
+		claim.Status = "documented"
+	case e.tracker.CountIndependentOrigins(supportFP, supportDom) >= 2:
+		claim.Status = "corroborated"
 	}
+}
 
-	// 4. Sem evidência independente suficiente
-	claim.Status = "unconfirmed"
-	claim.Applicability = "indeterminate"
+var (
+	// Trechos que só listam assuntos ou declaram a ausência de conteúdo.
+	nonAssertiveRE = regexp.MustCompile(`(?i)\b(index of|table of contents|contents:|sitemap|title only|no (configuration|compatibility|command|support|example)s?\b|not (documented|described|covered))`)
+	// Verbos e marcadores de afirmação técnica.
+	// Sintaxe de configuração/CLI (o classificador nem sempre a reconhece como comando).
+	configSyntaxRE = regexp.MustCompile(`(?i)(\bpeer\s+\S+\s+as-number\b|\bas-number\s+\d+|\bbgp\s+\d{1,10}\b|\brouter\s+bgp\s+\d+|(^|\s)/(routing|interface|ip|system)\s+\w+|\bip\s+route(-static)?\s+\S+|\b(display|show|undo)\s+\w+)`)
+	assertiveRE    = regexp.MustCompile(`(?i)\b(supports?|supported|configure[sd]?|configuring|enable[sd]?|use the command|run the command|is available|can be (configured|used|enabled)|example|procedure|steps?)\b`)
+)
+
+// assertsContent informa se o trecho afirma algo (comando CLI ou frase de
+// suporte/procedimento), em vez de apenas conter as palavras da consulta.
+func assertsContent(lowerSnippet string, hasCLI bool) bool {
+	if nonAssertiveRE.MatchString(lowerSnippet) {
+		return false
+	}
+	return hasCLI || configSyntaxRE.MatchString(lowerSnippet) || assertiveRE.MatchString(lowerSnippet)
 }
 
 // BuildClaimsFromPassages analisa as passagens de uma campanha e sintetiza claims atômicas estruturadas.
@@ -307,7 +311,9 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 			strings.Contains(lowerSnippet, "incompatible") ||
 			strings.Contains(lowerSnippet, "unsupported") {
 			stance = "refutes"
-		} else if !featureMatch {
+		} else if !featureMatch || !assertsContent(lowerSnippet, len(classification.CLICommands) > 0) {
+			// Os termos aparecem, mas o trecho não afirma nada utilizável (índice,
+			// título, lista de assuntos): relevância lexical não é prova.
 			stance = "mentions"
 		}
 
@@ -388,22 +394,22 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		}
 
 		ev := domain.Evidence{
-			ID:                 fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
-			ClaimID:            claim.ID,
-			DocumentID:         p.DocumentID,
-			PassageID:          &p.PassageID,
-			ClusterID:          &clusterID,
-			Stance:             stance,
-			Excerpt:            p.Snippet,
-			Page:               p.Page,
-			Confidence:         confidence,
-			IsOfficialDoc:      classification.IsOfficialDoc,
-			Notes:              notes,
-			VendorMatch:        vendorMatch,
-			ModelMatch:         modelMatch,
-			FirmwareMatch:      firmwareMatch,
-			FeatureMatch:       featureMatch,
-			SourceSpan:         fmt.Sprintf("doc:%s:p:%d", p.DocumentID, p.PassageID),
+			ID:            fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
+			ClaimID:       claim.ID,
+			DocumentID:    p.DocumentID,
+			PassageID:     &p.PassageID,
+			ClusterID:     &clusterID,
+			Stance:        stance,
+			Excerpt:       p.Snippet,
+			Page:          p.Page,
+			Confidence:    confidence,
+			IsOfficialDoc: classification.IsOfficialDoc,
+			Notes:         notes,
+			VendorMatch:   vendorMatch,
+			ModelMatch:    modelMatch,
+			FirmwareMatch: firmwareMatch,
+			FeatureMatch:  featureMatch,
+			SourceSpan:    fmt.Sprintf("doc:%s:p:%d", p.DocumentID, p.PassageID),
 		}
 		claim.Evidences = append(claim.Evidences, ev)
 	}

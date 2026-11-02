@@ -547,3 +547,182 @@ func cleanupCampaign(t *testing.T, st *Store, id string) {
 		_, _ = st.Pool().Exec(ctx, `DELETE FROM campaigns WHERE id=$1::uuid`, id)
 	})
 }
+
+// newTestStore abre o banco de testes e aplica as migrações.
+func newTestStore(t *testing.T) (*Store, context.Context) {
+	t.Helper()
+	dsn := strings.TrimSpace(os.Getenv("NIE_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("NIE_TEST_DATABASE_URL não definido")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+	st, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return st, ctx
+}
+
+// Pistas geradas depois que a campanha terminou precisam ser executadas:
+// EnqueueDiscovery reabre a campanha, e a mesma consulta nunca entra duas vezes.
+func TestP0D_DiscoveryReopensCompletedCampaignAndDedupes(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "reabrir "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 2, MaxDomains: 2, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+
+	// Campanha termina normalmente.
+	if _, err := st.Pool().Exec(ctx, `UPDATE jobs SET status='done' WHERE campaign_id=$1::uuid`, camp.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.FinishIdleCampaigns(ctx); err != nil || n < 1 {
+		t.Fatalf("FinishIdleCampaigns = %d, %v", n, err)
+	}
+	if got, _ := st.GetCampaign(ctx, camp.ID); got.Status != "completed" {
+		t.Fatalf("campanha deveria estar concluída, status=%s", got.Status)
+	}
+
+	ok, err := st.EnqueueDiscovery(ctx, camp.ID, "discover_web", "Huawei  NE8000 PPPoE")
+	if err != nil || !ok {
+		t.Fatalf("primeira pista deveria entrar: ok=%v err=%v", ok, err)
+	}
+	if got, _ := st.GetCampaign(ctx, camp.ID); got.Status != "running" {
+		t.Fatalf("a campanha deveria ser reaberta, status=%s", got.Status)
+	}
+	job, err := st.ClaimJob(ctx, time.Minute)
+	if err != nil || job == nil || job.CampaignID != camp.ID || job.Kind != "discover_web" {
+		t.Fatalf("o worker deveria obter a pista da campanha reaberta: %+v err=%v", job, err)
+	}
+
+	// Mesma consulta (outra caixa e espaçamento) não gera novo job.
+	for _, q := range []string{"huawei ne8000 pppoe", "  HUAWEI NE8000   PPPoE "} {
+		if dup, err := st.EnqueueDiscovery(ctx, camp.ID, "discover_web", q); err != nil || dup {
+			t.Errorf("consulta repetida %q não deveria entrar: dup=%v err=%v", q, dup, err)
+		}
+	}
+	// Outro provedor com a mesma consulta é uma pesquisa distinta.
+	if ok, err := st.EnqueueDiscovery(ctx, camp.ID, "discover_mwmbl", "huawei ne8000 pppoe"); err != nil || !ok {
+		t.Errorf("mesmo texto em outro provedor deveria entrar: ok=%v err=%v", ok, err)
+	}
+
+	var n int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM jobs WHERE campaign_id=$1::uuid AND kind='discover_web'`, camp.ID).Scan(&n); err != nil || n != 1 {
+		t.Errorf("jobs discover_web = %d (err=%v), quer 1", n, err)
+	}
+	// Pesquisas externas não consomem o orçamento de URLs (max_urls=2 já tem 1 fetch).
+	if ok, err := st.EnqueueFetch(ctx, camp.ID, "https://other.example/b", 1, "https://seed.example/a", "link", 50); err != nil || !ok {
+		t.Errorf("fetch dentro do orçamento deveria entrar mesmo após pesquisas: ok=%v err=%v", ok, err)
+	}
+}
+
+// Reexecutar a investigação não duplica claims, a independência de origens
+// sobrevive ao recarregamento e o tipo da aresta de descoberta é preservado.
+func TestP1_SaveClaimsIdempotentAndClustersPersist(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "claims idempotentes "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+
+	mkDoc := func(text, host string) string {
+		id, _, err := st.RecordDocument(ctx, DocumentRecord{
+			SHA256: hashFor(text + fmt.Sprint(time.Now().UnixNano())), MIME: "text/html", Title: text, Size: 10, Text: text,
+			CampaignID: camp.ID, URL: "https://" + host + "/p", NormalizedURL: "https://" + host + "/p", Domain: host, StatusCode: 200,
+			Passages: []domain.Passage{{Ordinal: 0, Text: text}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	docA, docB := mkDoc("bgp 65000 peer", "blog-a.example"), mkDoc("bgp 65000 peer", "blog-b.example")
+	fp := "fingerprint-copia"
+	claims := []domain.Claim{{
+		CampaignID: camp.ID, Title: "BGP", Statement: "x", Status: "unconfirmed", Applicability: "indeterminate", OperationalValidation: "untested",
+		Evidences: []domain.Evidence{
+			{DocumentID: docA, ClusterID: &fp, Stance: "supports", Excerpt: "a", Notes: "Fonte: blog-a.example"},
+			{DocumentID: docB, ClusterID: &fp, Stance: "supports", Excerpt: "b", Notes: "Fonte: blog-b.example"},
+		},
+	}}
+
+	for i := 0; i < 3; i++ { // três execuções de /investigate
+		if err := st.SaveClaims(ctx, claims); err != nil {
+			t.Fatalf("SaveClaims #%d: %v", i+1, err)
+		}
+	}
+	got, err := st.ListClaimsByCampaign(ctx, camp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(got[0].Evidences) != 2 {
+		t.Fatalf("reexecuções não podem duplicar: %d claims, evidências=%d", len(got), len(got[0].Evidences))
+	}
+	a, b := got[0].Evidences[0].ClusterID, got[0].Evidences[1].ClusterID
+	if a == nil || b == nil || *a != *b {
+		t.Fatalf("cópias do mesmo texto devem compartilhar um cluster persistido: %v %v", a, b)
+	}
+	var count int
+	var rootDomain string
+	if err := st.Pool().QueryRow(ctx, `SELECT duplicate_count, root_domain FROM origin_clusters WHERE id=$1::uuid`, *a).Scan(&count, &rootDomain); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || rootDomain == "" {
+		t.Errorf("origin_cluster: réplicas=%d (quer 2), domínio=%q", count, rootDomain)
+	}
+
+	// Claim sem validação some quando deixa de ser produzido; o validado em bancada permanece.
+	if _, err := st.Pool().Exec(ctx, `UPDATE claims SET operational_validation='lab_validated' WHERE campaign_id=$1::uuid`, camp.ID); err != nil {
+		t.Fatal(err)
+	}
+	other := []domain.Claim{{CampaignID: camp.ID, Title: "Outro", Statement: "y", Status: "unconfirmed", Applicability: "indeterminate", OperationalValidation: "untested"}}
+	if err := st.SaveClaims(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.ListClaimsByCampaign(ctx, camp.ID)
+	if len(got) != 2 {
+		t.Errorf("claim validado em bancada deve ser preservado: %d claims", len(got))
+	}
+}
+
+func TestP1_EdgeKindPreservedForSitemapAndFeed(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "arestas "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/sitemap.xml"},
+		domain.Budget{MaxDepth: 2, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+	for _, kind := range []string{"sitemap", "feed", "link"} {
+		if ok, err := st.EnqueueFetch(ctx, camp.ID, "https://seed.example/"+kind, 1, "https://seed.example/sitemap.xml", kind, 50); err != nil || !ok {
+			t.Fatalf("EnqueueFetch %s: ok=%v err=%v", kind, ok, err)
+		}
+	}
+	rows, err := st.Pool().Query(ctx, `SELECT kind, to_url FROM discovery_edges WHERE campaign_id=$1::uuid`, camp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var k, u string
+		if err := rows.Scan(&k, &u); err != nil {
+			t.Fatal(err)
+		}
+		got[u] = k
+	}
+	for _, kind := range []string{"sitemap", "feed", "link"} {
+		if got["https://seed.example/"+kind] != kind {
+			t.Errorf("aresta para /%s gravada como %q", kind, got["https://seed.example/"+kind])
+		}
+	}
+}

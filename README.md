@@ -16,7 +16,7 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 
 | Componente | Status | Evidência / limitação |
 |---|---|---|
-| **Motor de evidências** (P0-01) | Testado | `internal/evidence/engine_test.go`: aplicabilidade exige `vendor`, `model`, `firmware` e `feature` estruturados; notas de texto não promovem status |
+| **Motor de evidências** (P0-01) | Testado (regras) | Cada evidência é avaliada isoladamente: só `supports` conta; menções não corroboram; flags de evidências diferentes não se fundem; trecho que apenas lista os termos (índice, título) vira `mentions`. Testes adversariais em `engine_test.go` e `audit_new_test.go`. A decisão ainda usa heurística lexical (`strings.Contains`), não leitura da proposição: pode errar para mais ou para menos |
 | **Schema de claims ↔ motor** (P0-02) | Testado com PostgreSQL 16 | Migração `0005`; `TestP002_SaveClaimsWithDocumentedAndApplicableSchema`; a rota `/investigate` falha com 500 se não persistir |
 | **Fila PostgreSQL + `SKIP LOCKED` + lease** | Testado com PostgreSQL 16 | `internal/store/store_integration_test.go` (requer `NIE_TEST_DATABASE_URL`); PostgreSQL 18 não testado |
 | **Integridade do original no CAS** (P1-04) | Testado | Workers guardam a entidade HTTP descomprimida no charset de origem (gzip, ISO-8859-1, `<meta charset>`); DOM renderizado segue como derivado (`RenderedContent`). `workers/test_workers_ssrf.py`, `internal/crawler/router_test.go` |
@@ -30,9 +30,14 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 | **Sitemap / RSS / Atom** | Testado | `internal/extract/feed.go`: `urlset`, `sitemapindex`, RSS, Atom e `<link rel="alternate">`; arestas `sitemap`/`feed`. Sitemaps do `robots.txt` ainda não são lidos |
 | **Menções sem link** | Testado (unidade) | `internal/extract/mentions.go`: referências genéricas (CVE, DOI, arXiv, ISO/IEC/IEEE/ITU-T/NIST/ABNT) e vocabulário de telecom geram consultas de descoberta |
 | **Priorização da fronteira** (P1-05) | Testado (unidade) | `computeFrontierPriority`: termos da campanha antes, páginas de ruído (login, share…) depois |
-| **Origin clustering** (P1-06) | Testado (unidade) | Fingerprint de conteúdo; cópias idênticas = 1 origem. `RecordOriginCluster` não é chamado pelo fluxo |
-| **Ciclo adaptativo de pistas** | Parcial | Pistas vão para a fila (com orçamento e dedupe) só quando `POST /api/campaigns/{id}/investigate` é chamado; não há rodada automática |
-| **Git Eye** (P1-07) | Parcial | Busca de repositórios GitHub + READMEs e varredura de Git local com SHA; sem busca por conteúdo remoto, GitLab ou Zoekt |
+| **Origin clustering** (P1-06) | Testado com PostgreSQL 16 | Fingerprint de conteúdo persistido em `origin_clusters`; evidências gravam `cluster_id`, que sobrevive ao recarregamento. Fingerprint idêntico = 1 origem; independência real de autoria não é inferida |
+| **Ciclo adaptativo de pistas** | Parcial | Pistas entram na fila com dedupe por campanha+provedor+consulta, reabrem campanha concluída e rodam (teste com PostgreSQL 16). Continua disparado por `POST /api/campaigns/{id}/investigate`; não há rodada automática, critério de parada nem uso de LLM no fluxo (`PlanSubquestions` não é chamado) |
+| **Git Eye** (P1-07) | Parcial | Varredura local com proveniência verdadeira: `Revision` só é um SHA se o trecho existe no blob daquele commit; alteração não commitada ou arquivo não rastreado vem como `working_tree`/`uncommitted`/`dirty` com `base_revision`. Busca de repositórios e READMEs no GitHub; sem busca por conteúdo remoto, GitLab ou Zoekt |
+| **Claims idempotentes** | Testado com PostgreSQL 16 | `SaveClaims` faz upsert por (campanha, título): reexecutar `/investigate` não duplica; claims com validação em bancada nunca são apagados |
+| **Original preservado sem texto** | Testado com PostgreSQL 16 | PDF escaneado ou com falha de extração vai para o CAS e é registrado como `extraction_pending`; OCR/Docling para reprocessar ainda não existem |
+| **Orçamento de pesquisas** | Testado com PostgreSQL 16 | Pesquisas externas (máx. 50 por campanha) não consomem `max_urls`, que conta só downloads |
+| **Recuperação para o dossiê** | Testado (unidade) | A pergunta é decomposta em consultas curtas (fabricante, modelo, firmware, recurso) e os resultados são fundidos; recall@k nunca foi medido |
+| **Tipos de aresta** | Testado com PostgreSQL 16 | Arestas `sitemap` e `feed` são preservadas no grafo |
 | **Links em PDFs** (P1-08) | Testado (unidade) | URLs encontradas no texto; anotações de link embutidas no PDF não são lidas |
 | **Dossiê** | Testado (unidade) | Toda afirmação contestada, só documentada ou sem evidência suficiente recebe advertência; o resumo informa quando nenhuma conclusão é sustentada |
 | **Arquitetura genérica** (ADR-009) | Parcial | Descoberta e dossiê funcionam fora de telecom; classificador e requisitos do motor de evidências ainda são de telecom |
