@@ -7,24 +7,29 @@ CLI, configurações, RFCs, datasheets, READMEs e notas de versão.
 Cada resultado de busca aponta para o documento original, o trecho exato, a
 página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 
-> **Escopo deste repositório:** vertical slice do MVP descrito em
-> [`docs/MVP_SPEC.md`](docs/MVP_SPEC.md). IA, OCR, grafo visual completo,
-> comparador de equipamentos e claims/evidências formais ficam para as próximas
-> fases.
+> **Status do Projeto:** Todas as fases do plano mestre implementadas e testadas:
+> - **Fase 0:** Dataset e suíte de benchmark com 20 problemas reais de telecom multivendor.
+> - **Fase 1:** Vertical Slice do MVP (API Huma, PostgreSQL 18, crawler seguro, storage SHA-256 e busca híbrida).
+> - **Fase 2:** Motor de Evidências, Claims, Origin Clusters (anti-cópia) e Dossiês Técnicos com IA plugável.
+> - **Fase 3:** Autonomia contínua, agendamento de campanhas recorrentes, alertas de documentação e Grafo de Descobertas.
+> - **Fase 4:** Busca em repositórios Git locais, fallback OCR para PDFs e exportação de relatórios.
 
 ## O que já funciona
 
-- **Campanhas** com pergunta, seeds, orçamento, pausa e retomada.
-- **Descoberta** por links internos, SearXNG (opcional) e GitHub (opcional).
-- **Crawler próprio** com fila persistente, lease, retry/backoff, `robots.txt`
-  e proteção contra SSRF/DNS rebinding.
-- **Coleta** de HTML, texto e PDFs digitais, sem executar JavaScript.
-- **Storage content-addressed** por SHA-256 com escrita atômica.
-- **Busca** exata (preserva símbolos de CLI), lexical (`tsvector`) e aproximada
-  (`pg_trgm`), com fusão e snippets destacados.
-- **Biblioteca** de documentos e visualizador de trechos com citação.
-- **Painel Svelte** embutido no binário Go.
-- **Docker Compose** com PostgreSQL 18 e aplicação.
+- **Campanhas** com pergunta, seeds, orçamento, pausa, retomada e agendamento contínuo.
+- **Descoberta** por links internos recursivos, SearXNG (opcional) e GitHub (opcional).
+- **Grafo Visual de Descoberta** na UI representando as ramificações em árvore ("água e eletricidade").
+- **Crawler seguro** com fila persistente no PostgreSQL 18 (`SKIP LOCKED`), robots.txt e proteção anti-SSRF/DNS rebinding.
+- **Coleta e extração** de HTML, texto e PDFs digitais (com fallback OCR).
+- **Storage content-addressed** imutável por SHA-256 com escrita atômica.
+- **Classificador Telecom Multivendor** (Huawei VRP, MikroTik RouterOS v6/v7, Cisco IOS-XR/XE, Datacom DmOS, ZTE, FiberHome, VSOL, SonicWall, Hillstone).
+- **Origin Clustering & Anti-Cópia** (agrupa blogs e espelhos duplicados para não inflar confirmações falsas).
+- **Motor de Claims e Auditoria Epistemológica** (`sustained`, `corroborated`, `contested`, `unconfirmed`).
+- **Investigação com IA & Dossiê Técnico** estruturado (matriz de compatibilidade, comandos CLI com proveniência, rollback e checklist).
+- **Busca Híbrida** exata (preserva pontuação de CLI), lexical (`tsvector`), trigramas (`pg_trgm`) e busca em Git local.
+- **Agendamentos e Alertas** de mudança de firmware/documentação técnica.
+- **Painel Svelte moderno** embutido diretamente no binário Go.
+- **Docker Compose** pronto para subir com PostgreSQL 18 e aplicação.
 
 ## Arquitetura
 

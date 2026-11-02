@@ -15,6 +15,7 @@ import (
 	"nie/internal/config"
 	"nie/internal/crawler"
 	"nie/internal/discovery"
+	"nie/internal/scheduler"
 	"nie/internal/storage"
 	"nie/internal/store"
 	"nie/internal/version"
@@ -60,6 +61,12 @@ func main() {
 
 	w := worker.New(st, objects, fetcher, robots, searx, gh, cfg, logger)
 	go w.Run(ctx)
+
+	if cfg.SchedulerEnabled {
+		sched := scheduler.New(st, logger, cfg.SchedulerInterval)
+		sched.Start(ctx)
+		defer sched.Stop()
+	}
 
 	handler := api.New(st, cfg, logger)
 	srv := &http.Server{

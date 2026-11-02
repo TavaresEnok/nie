@@ -154,3 +154,161 @@ type Dossier struct {
 	Markdown       string          `json:"markdown"`
 	GeneratedAt    time.Time       `json:"generated_at"`
 }
+
+// Fase 2: Fabricantes, Modelos e Firmware
+type Vendor struct {
+	ID        string    `json:"id"`
+	Slug      string    `json:"slug"`
+	Name      string    `json:"name"`
+	CLIFamily string    `json:"cli_family"`
+	Aliases   []string  `json:"aliases"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type DeviceModel struct {
+	ID        string    `json:"id"`
+	VendorID  string    `json:"vendor_id"`
+	Slug      string    `json:"slug"`
+	Name      string    `json:"name"`
+	Family    string    `json:"family"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type FirmwareRelease struct {
+	ID        string    `json:"id"`
+	VendorID  string    `json:"vendor_id"`
+	ModelID   *string   `json:"model_id,omitempty"`
+	Name      string    `json:"name"`
+	Version   string    `json:"version"`
+	OSName    string    `json:"os_name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Fase 2: Evidências, Origin Clusters e Claims
+type OriginCluster struct {
+	ID             string    `json:"id"`
+	CampaignID     string    `json:"campaign_id"`
+	Fingerprint    string    `json:"fingerprint"`
+	RootDomain     string    `json:"root_domain"`
+	CanonicalURL   string    `json:"canonical_url"`
+	DuplicateCount int       `json:"duplicate_count"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type Evidence struct {
+	ID            string    `json:"id"`
+	ClaimID       string    `json:"claim_id"`
+	DocumentID    string    `json:"document_id"`
+	PassageID     *int64    `json:"passage_id,omitempty"`
+	ClusterID     *string   `json:"cluster_id,omitempty"`
+	Stance        string    `json:"stance"` // supports, refutes, mentions
+	Excerpt       string    `json:"excerpt"`
+	Page          *int      `json:"page,omitempty"`
+	Confidence    float32   `json:"confidence"`
+	IsOfficialDoc bool      `json:"is_official_doc"`
+	Notes         string    `json:"notes,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type Contradiction struct {
+	ID          string    `json:"id"`
+	ClaimID     string    `json:"claim_id"`
+	EvidenceAID string    `json:"evidence_a_id"`
+	EvidenceBID string    `json:"evidence_b_id"`
+	Explanation string    `json:"explanation"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Claim struct {
+	ID                    string          `json:"id"`
+	CampaignID            string          `json:"campaign_id"`
+	Title                 string          `json:"title"`
+	Statement             string          `json:"statement"`
+	VendorID              *string         `json:"vendor_id,omitempty"`
+	VendorName            string          `json:"vendor_name,omitempty"`
+	ModelID               *string         `json:"model_id,omitempty"`
+	FirmwareID            *string         `json:"firmware_id,omitempty"`
+	Status                string          `json:"status"` // unconfirmed, sustained, corroborated, contested, validated_lab
+	Applicability         string          `json:"applicability"` // confirmed, incompatible, indeterminate
+	OperationalValidation string          `json:"operational_validation"` // untested, lab_validated, failed
+	CreatedAt             time.Time       `json:"created_at"`
+	UpdatedAt             time.Time       `json:"updated_at"`
+	Evidences             []Evidence      `json:"evidences,omitempty"`
+	Contradictions        []Contradiction `json:"contradictions,omitempty"`
+}
+
+type InvestigationDossier struct {
+	Campaign            Campaign          `json:"campaign"`
+	Summary             string            `json:"summary"`
+	KeyFindings         []string          `json:"key_findings"`
+	Claims              []Claim           `json:"claims"`
+	CompatibilityMatrix map[string]string `json:"compatibility_matrix"`
+	CLICommands         []string          `json:"cli_commands"`
+	Warnings            []string          `json:"warnings"`
+	RollbackPlan        string            `json:"rollback_plan"`
+	LabChecklist        []string          `json:"lab_checklist"`
+	Markdown            string            `json:"markdown"`
+	GeneratedAt         time.Time         `json:"generated_at"`
+}
+
+// Fase 3: Autonomia, Agendamentos e Alertas
+type Schedule struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Query           string     `json:"query"`
+	SeedURLs        []string   `json:"seed_urls"`
+	IntervalSeconds int        `json:"interval_seconds"`
+	MaxDepth        int        `json:"max_depth"`
+	MaxURLs         int        `json:"max_urls"`
+	MaxDomains      int        `json:"max_domains"`
+	Enabled         bool       `json:"enabled"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt       time.Time  `json:"next_run_at"`
+	LastCampaignID  *string    `json:"last_campaign_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type Alert struct {
+	ID           string    `json:"id"`
+	CampaignID   *string   `json:"campaign_id,omitempty"`
+	Title        string    `json:"title"`
+	Message      string    `json:"message"`
+	Severity     string    `json:"severity"` // info, warning, critical
+	Acknowledged bool      `json:"acknowledged"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type DocumentDiff struct {
+	ID         int64     `json:"id"`
+	DocumentID string    `json:"document_id"`
+	URL        string    `json:"url"`
+	OldSHA256  string    `json:"old_sha256"`
+	NewSHA256  string    `json:"new_sha256"`
+	Summary    string    `json:"summary"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// Fase 3: Grafo Visual de Descoberta
+type GraphNode struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Domain string `json:"domain"`
+	Depth  int    `json:"depth"`
+	Type   string `json:"type"` // seed, link, search
+	Status string `json:"status"`
+}
+
+type GraphEdge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Kind   string `json:"kind"`
+	Depth  int    `json:"depth"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type DiscoveryGraph struct {
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+

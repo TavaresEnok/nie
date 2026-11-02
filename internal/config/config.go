@@ -29,6 +29,15 @@ type Config struct {
 	SearXNGURL      string
 	GitHubEnabled   bool
 	GitHubToken     string
+
+	// Fase 2 e 3: IA, Autonomia e Git Local
+	AIProvider        string
+	AIBaseURL         string
+	AIAPIKey          string
+	AIModel           string
+	SchedulerEnabled  bool
+	SchedulerInterval time.Duration
+	GitLocalDir       string
 }
 
 func Load() Config {
@@ -37,24 +46,31 @@ func Load() Config {
 		rate = 1
 	}
 	return Config{
-		Addr:            env("NIE_ADDR", "127.0.0.1:8080"),
-		DatabaseURL:     env("NIE_DATABASE_URL", "postgres://nie:nie@127.0.0.1:5432/nie?sslmode=disable"),
-		DataDir:         env("NIE_DATA_DIR", "./data"),
-		WebDir:          env("NIE_WEB_DIR", ""),
-		APIToken:        env("NIE_API_TOKEN", ""),
-		UserAgent:       env("NIE_USER_AGENT", "NIEBot/0.1 (+https://localhost)"),
-		LogLevel:        strings.ToLower(env("NIE_LOG_LEVEL", "info")),
-		WorkerEnabled:   envBool("NIE_WORKER", true),
-		WorkerCount:     envInt("NIE_WORKERS", 2),
-		PollInterval:    envDuration("NIE_POLL_INTERVAL", 2*time.Second),
-		RequestTimeout:  envDuration("NIE_REQUEST_TIMEOUT", 30*time.Second),
-		MaxHTMLBytes:    envInt64("NIE_MAX_HTML_BYTES", 5<<20),
-		MaxPDFBytes:     envInt64("NIE_MAX_PDF_BYTES", 50<<20),
-		MaxTextBytes:    envInt64("NIE_MAX_TEXT_BYTES", 5<<20),
-		RateLimitPerMin: rate,
-		SearXNGURL:      strings.TrimRight(env("NIE_SEARXNG_URL", ""), "/"),
-		GitHubEnabled:   envBool("NIE_GITHUB_ENABLED", false) || env("NIE_GITHUB_TOKEN", "") != "",
-		GitHubToken:     env("NIE_GITHUB_TOKEN", ""),
+		Addr:              env("NIE_ADDR", "127.0.0.1:8080"),
+		DatabaseURL:       env("NIE_DATABASE_URL", "postgres://nie:nie@127.0.0.1:5432/nie?sslmode=disable"),
+		DataDir:           env("NIE_DATA_DIR", "./data"),
+		WebDir:            env("NIE_WEB_DIR", ""),
+		APIToken:          env("NIE_API_TOKEN", ""),
+		UserAgent:         env("NIE_USER_AGENT", "NIEBot/0.1 (+https://localhost)"),
+		LogLevel:          strings.ToLower(env("NIE_LOG_LEVEL", "info")),
+		WorkerEnabled:     envBool("NIE_WORKER", true),
+		WorkerCount:       envInt("NIE_WORKERS", 2),
+		PollInterval:      envDuration("NIE_POLL_INTERVAL", 2*time.Second),
+		RequestTimeout:    envDuration("NIE_REQUEST_TIMEOUT", 30*time.Second),
+		MaxHTMLBytes:      envInt64("NIE_MAX_HTML_BYTES", 5<<20),
+		MaxPDFBytes:       envInt64("NIE_MAX_PDF_BYTES", 50<<20),
+		MaxTextBytes:      envInt64("NIE_MAX_TEXT_BYTES", 5<<20),
+		RateLimitPerMin:   rate,
+		SearXNGURL:        strings.TrimRight(env("NIE_SEARXNG_URL", ""), "/"),
+		GitHubEnabled:     envBool("NIE_GITHUB_ENABLED", false) || env("NIE_GITHUB_TOKEN", "") != "",
+		GitHubToken:       env("NIE_GITHUB_TOKEN", ""),
+		AIProvider:        strings.ToLower(env("NIE_AI_PROVIDER", "none")),
+		AIBaseURL:         env("NIE_AI_BASE_URL", ""),
+		AIAPIKey:          env("NIE_AI_API_KEY", ""),
+		AIModel:           env("NIE_AI_MODEL", "qwen2.5:7b"),
+		SchedulerEnabled:  envBool("NIE_SCHEDULER_ENABLED", true),
+		SchedulerInterval: envDuration("NIE_SCHEDULER_INTERVAL", 30*time.Second),
+		GitLocalDir:       env("NIE_GIT_LOCAL_DIR", ""),
 	}
 }
 

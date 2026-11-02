@@ -12,8 +12,11 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
+	"nie/internal/ai"
 	"nie/internal/config"
+	"nie/internal/discovery"
 	"nie/internal/domain"
+	"nie/internal/evidence"
 	"nie/internal/store"
 	"nie/internal/urlutil"
 	"nie/internal/version"
@@ -21,14 +24,34 @@ import (
 )
 
 type Server struct {
-	store   *store.Store
-	cfg     config.Config
-	logger  *slog.Logger
-	started time.Time
+	store       *store.Store
+	cfg         config.Config
+	logger      *slog.Logger
+	started     time.Time
+	aiSvc       *ai.Service
+	evidenceEng *evidence.Engine
+	gitLocal    *discovery.GitLocalFinder
 }
 
 func New(st *store.Store, cfg config.Config, logger *slog.Logger) http.Handler {
-	s := &Server{store: st, cfg: cfg, logger: logger, started: time.Now()}
+	aiSvc := ai.NewService(ai.Config{
+		Provider: cfg.AIProvider,
+		BaseURL:  cfg.AIBaseURL,
+		APIKey:   cfg.AIAPIKey,
+		Model:    cfg.AIModel,
+	})
+	evidenceEng := evidence.NewEngine()
+	gitLocal := discovery.NewGitLocal(cfg.GitLocalDir)
+
+	s := &Server{
+		store:       st,
+		cfg:         cfg,
+		logger:      logger,
+		started:     time.Now(),
+		aiSvc:       aiSvc,
+		evidenceEng: evidenceEng,
+		gitLocal:    gitLocal,
+	}
 	mux := http.NewServeMux()
 	hcfg := huma.DefaultConfig("Network Intelligence Engine API", version.Version)
 	hcfg.Info.Description = "Motor de descoberta, coleta e busca técnica com evidências citáveis."
@@ -45,6 +68,7 @@ func New(st *store.Store, cfg config.Config, logger *slog.Logger) http.Handler {
 	registerSearch(api, s)
 	registerDocuments(api, s)
 	registerJobs(api, s)
+	registerFase2and3(api, s)
 
 	mux.Handle("/", webui.Handler(cfg.WebDir))
 	return s.middleware(mux)

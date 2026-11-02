@@ -8,8 +8,6 @@
 # Frontend
 web/node_modules/
 web/dist/
-internal/webui/dist/*
-!internal/webui/dist/index.html
 
 # Ambiente e segredos
 .env

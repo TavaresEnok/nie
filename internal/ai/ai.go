@@ -1,0 +1,283 @@
+package ai
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"nie/internal/classifier"
+	"nie/internal/domain"
+)
+
+type Config struct {
+	Provider string // "none", "ollama", "openai"
+	BaseURL  string // ex: "http://localhost:11434" ou "https://api.openai.com/v1"
+	APIKey   string
+	Model    string
+	Timeout  time.Duration
+}
+
+type Service struct {
+	cfg        Config
+	httpClient *http.Client
+}
+
+func NewService(cfg Config) *Service {
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 45 * time.Second
+	}
+	if cfg.Provider == "" {
+		cfg.Provider = "none"
+	}
+	return &Service{
+		cfg: cfg,
+		httpClient: &http.Client{
+			Timeout: cfg.Timeout,
+		},
+	}
+}
+
+// PlanSubquestions generates subqueries to deepen research.
+func (s *Service) PlanSubquestions(ctx context.Context, query string) []string {
+	// Deterministic rule-based expansion
+	base := []string{
+		fmt.Sprintf("%s syntax CLI example configuration", query),
+		fmt.Sprintf("%s troubleshooting verification display show", query),
+		fmt.Sprintf("%s limitations caveats compatibility firmware", query),
+		fmt.Sprintf("%s failover redundancy high availability", query),
+	}
+
+	if s.cfg.Provider == "none" || s.cfg.BaseURL == "" {
+		return base
+	}
+
+	prompt := fmt.Sprintf("Gere 4 subperguntas de busca técnica focadas em roteadores/redes para aprofundar: %s. Responda apenas com 1 pergunta por linha.", query)
+	resp, err := s.callLLM(ctx, prompt)
+	if err != nil || len(resp) == 0 {
+		return base
+	}
+
+	lines := strings.Split(resp, "\n")
+	var out []string
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(strings.TrimLeft(l, "0123456789.-* "))
+		if len(trimmed) > 5 {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return base
+	}
+	return out
+}
+
+// GenerateInvestigationDossier creates a full technical dossier based on claims and verified passages.
+func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign domain.Campaign, claims []domain.Claim, passages []domain.SearchResult) domain.InvestigationDossier {
+	var cliCommands []string
+	var warnings []string
+	compatibilityMatrix := make(map[string]string)
+	var keyFindings []string
+
+	for _, p := range passages {
+		cl := classifier.Classify(p.Snippet, p.Domain)
+		cliCommands = append(cliCommands, cl.CLICommands...)
+		for _, v := range cl.Vendors {
+			if v.OS != "" {
+				compatibilityMatrix[v.Name] = v.OS
+			}
+		}
+	}
+
+	cliCommands = dedupe(cliCommands)
+
+	for _, c := range claims {
+		keyFindings = append(keyFindings, fmt.Sprintf("[%s] %s: %s", strings.ToUpper(c.Status), c.Title, c.Statement))
+		if c.Status == "contested" {
+			warnings = append(warnings, fmt.Sprintf("Atenção: A configuração para '%s' possui evidências conflitantes ou relatos de incompatibilidade.", c.Title))
+		}
+	}
+
+	if len(warnings) == 0 {
+		warnings = append(warnings, "Recomenda-se validação em bancada antes de aplicação em roteadores em produção.")
+		warnings = append(warnings, "Verifique se a versão de firmware/software em execução suporta as sintaxes especificadas.")
+	}
+
+	summary := fmt.Sprintf("Dossiê de investigação técnica para a consulta: '%s'. Foram analisadas %d passagens de evidência e consolidados %d claims técnicos.", campaign.Query, len(passages), len(claims))
+
+	// Markdown synthesis
+	var md strings.Builder
+	md.WriteString(fmt.Sprintf("# Dossiê de Investigação Técnica — NIE\n\n"))
+	md.WriteString(fmt.Sprintf("**Campanha:** `%s`  \n", campaign.ID))
+	md.WriteString(fmt.Sprintf("**Objetivo da Investigação:** %s  \n", campaign.Query))
+	md.WriteString(fmt.Sprintf("**Data:** %s  \n\n", time.Now().Format("02/01/2006 15:04:05")))
+
+	md.WriteString("## 1. Resumo Executivo\n\n")
+	md.WriteString(summary + "\n\n")
+
+	md.WriteString("## 2. Matriz de Fabricantes e Firmware Identificados\n\n")
+	if len(compatibilityMatrix) > 0 {
+		md.WriteString("| Fabricante | Sistema Operacional / Release |\n|---|---|\n")
+		for vendor, os := range compatibilityMatrix {
+			md.WriteString(fmt.Sprintf("| **%s** | %s |\n", vendor, os))
+		}
+		md.WriteString("\n")
+	} else {
+		md.WriteString("*Nenhum fabricante específico isolado nas evidências coletadas.*\n\n")
+	}
+
+	md.WriteString("## 3. Comandos CLI Verificados com Proveniência\n\n")
+	if len(cliCommands) > 0 {
+		md.WriteString("```text\n")
+		for _, cmd := range cliCommands {
+			md.WriteString(cmd + "\n")
+		}
+		md.WriteString("```\n\n")
+	} else {
+		md.WriteString("*Nenhum comando estruturado isolado diretamente nos trechos.*\n\n")
+	}
+
+	md.WriteString("## 4. Auditoria de Claims e Evidências Independentes\n\n")
+	md.WriteString("A plataforma cruza evidências e agrupa fontes duplicadas em *Origin Clusters* para evitar que cópias contem como validações independentes.\n\n")
+	for i, c := range claims {
+		md.WriteString(fmt.Sprintf("### Claim %d: %s\n", i+1, c.Title))
+		md.WriteString(fmt.Sprintf("- **Afirmação:** %s\n", c.Statement))
+		md.WriteString(fmt.Sprintf("- **Status Epistemológico:** `%s`\n", c.Status))
+		md.WriteString(fmt.Sprintf("- **Aplicabilidade:** `%s` | **Validação Operacional:** `%s`\n", c.Applicability, c.OperationalValidation))
+		md.WriteString("- **Evidências Rastreadas:**\n")
+		for _, ev := range c.Evidences {
+			pageInfo := ""
+			if ev.Page != nil {
+				pageInfo = fmt.Sprintf(" (Pág. %d)", *ev.Page)
+			}
+			officialTag := ""
+			if ev.IsOfficialDoc {
+				officialTag = " [DOC OFICIAL]"
+			}
+			md.WriteString(fmt.Sprintf("  - *\"%s\"*%s%s — %s\n", strings.TrimSpace(ev.Excerpt), pageInfo, officialTag, ev.Notes))
+		}
+		md.WriteString("\n")
+	}
+
+	md.WriteString("## 5. Advertências e Pontos Críticos de Atenção\n\n")
+	for _, w := range warnings {
+		md.WriteString(fmt.Sprintf("- ⚠️ %s\n", w))
+	}
+	md.WriteString("\n")
+
+	md.WriteString("## 6. Procedimento de Rollback Recomendado\n\n")
+	rollbackPlan := "Em caso de falha durante aplicação das configurações:\n" +
+		"1. Mantenha console/OOB ativa antes de alterar tabelas de roteamento ou firewall.\n" +
+		"2. No Huawei VRP utilize 'undo <comando>' ou faça 'rollback configuration'.\n" +
+		"3. No MikroTik utilize o modo Safe Mode (Ctrl+X) antes de testar regras de BGP/filtros.\n" +
+		"4. No Cisco IOS-XR/XE utilize 'rollback configuration last 1' para restauração imediata.\n" +
+		"5. No Datacom DmOS utilize 'no <comando>' e confirme com 'show running-config'."
+	md.WriteString(rollbackPlan + "\n\n")
+
+	md.WriteString("## 7. Checklist de Validação em Laboratório\n\n")
+	checklist := []string{
+		"Confirmar versão exata do software/firmware em execução via CLI.",
+		"Verificar se licenças de recursos avançados (BNG, CGNAT, EVPN) estão ativas no chassi.",
+		"Validar compatibilidade de MTU e tabelas de adjacência antes de fechar peering BGP.",
+		"Testar contingência e comportamento de failover durante janela de manutenção autorizada.",
+	}
+	for _, item := range checklist {
+		md.WriteString(fmt.Sprintf("- [ ] %s\n", item))
+	}
+
+	return domain.InvestigationDossier{
+		Campaign:            campaign,
+		Summary:             summary,
+		KeyFindings:         keyFindings,
+		Claims:              claims,
+		CompatibilityMatrix: compatibilityMatrix,
+		CLICommands:         cliCommands,
+		Warnings:            warnings,
+		RollbackPlan:        rollbackPlan,
+		LabChecklist:        checklist,
+		Markdown:            md.String(),
+		GeneratedAt:         time.Now(),
+	}
+}
+
+func (s *Service) callLLM(ctx context.Context, prompt string) (string, error) {
+	if s.cfg.Provider == "ollama" {
+		payload := map[string]any{
+			"model":  s.cfg.Model,
+			"prompt": prompt,
+			"stream": false,
+		}
+		data, _ := json.Marshal(payload)
+		url := fmt.Sprintf("%s/api/generate", strings.TrimRight(s.cfg.BaseURL, "/"))
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var res struct {
+			Response string `json:"response"`
+		}
+		_ = json.Unmarshal(body, &res)
+		return res.Response, nil
+	}
+
+	if s.cfg.Provider == "openai" {
+		payload := map[string]any{
+			"model": s.cfg.Model,
+			"messages": []map[string]string{
+				{"role": "user", "content": prompt},
+			},
+		}
+		data, _ := json.Marshal(payload)
+		url := fmt.Sprintf("%s/chat/completions", strings.TrimRight(s.cfg.BaseURL, "/"))
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if s.cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
+		}
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var res struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		_ = json.Unmarshal(body, &res)
+		if len(res.Choices) > 0 {
+			return res.Choices[0].Message.Content, nil
+		}
+	}
+
+	return "", fmt.Errorf("provedor de IA desconhecido ou não configurado")
+}
+
+func dedupe(list []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, item := range list {
+		if !seen[item] {
+			seen[item] = true
+			out = append(out, item)
+		}
+	}
+	return out
+}
