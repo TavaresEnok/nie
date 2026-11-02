@@ -38,6 +38,14 @@ type Config struct {
 	SchedulerEnabled  bool
 	SchedulerInterval time.Duration
 	GitLocalDir       string
+
+	// V2.1: Executores Especializados e Descobertas Complementares
+	ScrapyURL                string
+	Crawl4AIURL              string
+	MwmblURL                 string
+	WaybackEnabled           bool
+	SoftwareHeritageEnabled  bool
+	MentionsDiscoveryEnabled bool
 }
 
 func Load() Config {
@@ -68,9 +76,15 @@ func Load() Config {
 		AIBaseURL:         env("NIE_AI_BASE_URL", ""),
 		AIAPIKey:          env("NIE_AI_API_KEY", ""),
 		AIModel:           env("NIE_AI_MODEL", "qwen2.5:7b"),
-		SchedulerEnabled:  envBool("NIE_SCHEDULER_ENABLED", true),
-		SchedulerInterval: envDuration("NIE_SCHEDULER_INTERVAL", 30*time.Second),
-		GitLocalDir:       env("NIE_GIT_LOCAL_DIR", ""),
+		SchedulerEnabled:        envBool("NIE_SCHEDULER_ENABLED", true),
+		SchedulerInterval:       envDuration("NIE_SCHEDULER_INTERVAL", 30*time.Second),
+		GitLocalDir:             env("NIE_GIT_LOCAL_DIR", ""),
+		ScrapyURL:               strings.TrimRight(env("NIE_SCRAPY_URL", ""), "/"),
+		Crawl4AIURL:             strings.TrimRight(env("NIE_CRAWL4AI_URL", ""), "/"),
+		MwmblURL:                strings.TrimRight(env("NIE_MWMBL_URL", "https://mwmbl.org"), "/"),
+		WaybackEnabled:          envBool("NIE_WAYBACK_ENABLED", true),
+		SoftwareHeritageEnabled: envBool("NIE_SOFTWARE_HERITAGE_ENABLED", true),
+		MentionsDiscoveryEnabled: envBool("NIE_MENTIONS_DISCOVERY_ENABLED", true),
 	}
 }
 

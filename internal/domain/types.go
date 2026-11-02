@@ -312,3 +312,43 @@ type DiscoveryGraph struct {
 	Edges []GraphEdge `json:"edges"`
 }
 
+// V2.1: Contrato dos Executores e Descoberta Contínua (ADENDO MESTRE V2.1)
+type DiscoveryCandidate struct {
+	URL            string    `json:"url"`
+	NormalizedURL  string    `json:"normalized_url"`
+	FromDocumentID *string   `json:"from_document_id,omitempty"`
+	DiscoveryType  string    `json:"discovery_type"` // link, sitemap, mention, citation, api
+	CampaignID     string    `json:"campaign_id"`
+	Depth          int       `json:"depth"`
+	Score          float64   `json:"score"`
+	Reason         string    `json:"reason"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type FetchTask struct {
+	ID           string        `json:"id"`
+	CampaignID   string        `json:"campaign_id"`
+	URL          string        `json:"url"`
+	Mode         string        `json:"mode"`     // http, browser, git, file
+	Executor     string        `json:"executor"` // native, scrapy, crawl4ai
+	Deadline     time.Time     `json:"deadline"`
+	Timeout      time.Duration `json:"timeout"`
+	MaxBytes     int64         `json:"max_bytes"`
+	DomainPolicy string        `json:"domain_policy"`
+	CreatedAt    time.Time     `json:"created_at"`
+}
+
+type FetchResult struct {
+	TaskID            string         `json:"task_id"`
+	EffectiveURL      string         `json:"effective_url"`
+	StatusCode        int            `json:"status_code"`
+	ContentType       string         `json:"content_type"`
+	RawContent        []byte         `json:"-"`
+	Text              string         `json:"text"`
+	ExtractedLinks    []string       `json:"extracted_links"`
+	ExtractedMentions []string       `json:"extracted_mentions"`
+	Duration          time.Duration  `json:"duration"`
+	Error             string         `json:"error,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+}
+

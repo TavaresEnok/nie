@@ -163,10 +163,16 @@ func registerHealth(api huma.API, s *Server) {
 func registerMeta(api huma.API, s *Server) {
 	type out struct {
 		Body struct {
-			Version      string `json:"version"`
-			WebDiscovery bool   `json:"web_discovery"`
-			GitDiscovery bool   `json:"git_discovery"`
-			AuthRequired bool   `json:"auth_required"`
+			Version                   string `json:"version"`
+			WebDiscovery              bool   `json:"web_discovery"`
+			GitDiscovery              bool   `json:"git_discovery"`
+			MwmblDiscovery            bool   `json:"mwmbl_discovery"`
+			WaybackEnabled            bool   `json:"wayback_enabled"`
+			SoftwareHeritageDiscovery bool   `json:"software_heritage_discovery"`
+			MentionsDiscovery         bool   `json:"mentions_discovery"`
+			ScrapyConfigured          bool   `json:"scrapy_configured"`
+			Crawl4AIConfigured        bool   `json:"crawl4ai_configured"`
+			AuthRequired              bool   `json:"auth_required"`
 		}
 	}
 	huma.Register(api, huma.Operation{
@@ -176,6 +182,12 @@ func registerMeta(api huma.API, s *Server) {
 		o.Body.Version = version.Version
 		o.Body.WebDiscovery = s.cfg.SearXNGURL != ""
 		o.Body.GitDiscovery = s.cfg.GitHubEnabled
+		o.Body.MwmblDiscovery = s.cfg.MwmblURL != ""
+		o.Body.WaybackEnabled = s.cfg.WaybackEnabled
+		o.Body.SoftwareHeritageDiscovery = s.cfg.SoftwareHeritageEnabled
+		o.Body.MentionsDiscovery = s.cfg.MentionsDiscoveryEnabled
+		o.Body.ScrapyConfigured = s.cfg.ScrapyURL != ""
+		o.Body.Crawl4AIConfigured = s.cfg.Crawl4AIURL != ""
 		o.Body.AuthRequired = s.cfg.APIToken != ""
 		return o, nil
 	})
@@ -201,15 +213,17 @@ func registerStats(api huma.API, s *Server) {
 
 type campaignInput struct {
 	Body struct {
-		Query           string   `json:"query" required:"true" minLength:"3" maxLength:"500"`
-		SeedURLs        []string `json:"seed_urls,omitempty" maxItems:"20"`
-		MaxDepth        int      `json:"max_depth,omitempty"`
-		MaxURLs         int      `json:"max_urls,omitempty"`
-		MaxDomains      int      `json:"max_domains,omitempty"`
-		MaxBytes        int64    `json:"max_bytes,omitempty"`
-		DomainInterval  int      `json:"min_domain_interval_seconds,omitempty"`
-		UseWebDiscovery *bool    `json:"use_web_discovery,omitempty"`
-		UseGitDiscovery *bool    `json:"use_git_discovery,omitempty"`
+		Query             string   `json:"query" required:"true" minLength:"3" maxLength:"500"`
+		SeedURLs          []string `json:"seed_urls,omitempty" maxItems:"20"`
+		MaxDepth          int      `json:"max_depth,omitempty"`
+		MaxURLs           int      `json:"max_urls,omitempty"`
+		MaxDomains        int      `json:"max_domains,omitempty"`
+		MaxBytes          int64    `json:"max_bytes,omitempty"`
+		DomainInterval    int      `json:"min_domain_interval_seconds,omitempty"`
+		UseWebDiscovery   *bool    `json:"use_web_discovery,omitempty"`
+		UseGitDiscovery   *bool    `json:"use_git_discovery,omitempty"`
+		UseMwmblDiscovery *bool    `json:"use_mwmbl_discovery,omitempty"`
+		UseSWHDiscovery   *bool    `json:"use_swh_discovery,omitempty"`
 	}
 }
 
@@ -296,13 +310,22 @@ func registerCampaigns(api huma.API, s *Server) {
 		if in.Body.UseGitDiscovery != nil {
 			git = *in.Body.UseGitDiscovery
 		}
+		mwmbl := s.cfg.MwmblURL != ""
+		if in.Body.UseMwmblDiscovery != nil {
+			mwmbl = *in.Body.UseMwmblDiscovery
+		}
+		swh := s.cfg.SoftwareHeritageEnabled
+		if in.Body.UseSWHDiscovery != nil {
+			swh = *in.Body.UseSWHDiscovery
+		}
+
 		if web && s.cfg.SearXNGURL == "" {
 			return nil, huma.Error400BadRequest("descoberta web solicitada, mas NIE_SEARXNG_URL não está configurada")
 		}
 		if git && !s.cfg.GitHubEnabled {
 			return nil, huma.Error400BadRequest("descoberta GitHub solicitada, mas o adaptador está desabilitado")
 		}
-		if len(seeds) == 0 && !web && !git {
+		if len(seeds) == 0 && !web && !git && !mwmbl && !swh {
 			return nil, huma.Error400BadRequest("informe ao menos uma seed ou habilite uma descoberta externa")
 		}
 
@@ -318,6 +341,16 @@ func registerCampaigns(api huma.API, s *Server) {
 		if git {
 			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_github", query); err != nil {
 				s.logger.Error("enfileirar descoberta github", "campaign", c.ID, "err", err)
+			}
+		}
+		if mwmbl {
+			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_mwmbl", query); err != nil {
+				s.logger.Error("enfileirar descoberta mwmbl", "campaign", c.ID, "err", err)
+			}
+		}
+		if swh {
+			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_swh", query); err != nil {
+				s.logger.Error("enfileirar descoberta swh", "campaign", c.ID, "err", err)
 			}
 		}
 		_ = s.store.FinishIfIdle(ctx, c.ID)

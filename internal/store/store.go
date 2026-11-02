@@ -349,8 +349,18 @@ func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, dep
 	return tag.RowsAffected() > 0, nil
 }
 
+func (s *Store) RecordDiscoveryEdge(ctx context.Context, campaignID, fromURL, toURL, kind, reason string, depth int) error {
+	toDomain := urlutil.Domain(toURL)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO discovery_edges(campaign_id, from_url, to_url, to_domain, kind, depth, reason)
+		VALUES($1::uuid, NULLIF($2, ''), $3, $4, $5, $6, $7)
+		ON CONFLICT (campaign_id, to_url) DO NOTHING
+	`, campaignID, fromURL, toURL, toDomain, kind, depth, reason)
+	return err
+}
+
 func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query string) (bool, error) {
-	if kind != "discover_web" && kind != "discover_github" {
+	if kind != "discover_web" && kind != "discover_github" && kind != "discover_mwmbl" && kind != "discover_swh" {
 		return false, fmt.Errorf("kind de descoberta inválido")
 	}
 	payload, _ := json.Marshal(map[string]string{"query": query})

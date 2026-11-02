@@ -1253,6 +1253,15 @@ footer {
 .tree-node.depth-1 { margin-left: 1.5rem; border-left: 2px solid var(--blue); }
 .tree-node.depth-2 { margin-left: 3rem; border-left: 2px solid var(--amber); }
 .tree-node.depth-3 { margin-left: 4.5rem; border-left: 2px solid var(--text-faint); }
+.tree-node.mention-node {
+  border-left: 3px dashed var(--amber) !important;
+  background: rgba(226, 179, 65, 0.08);
+}
+.cap.mention-cap {
+  background: var(--amber);
+  color: #0b0f14;
+  font-weight: 600;
+}
 
 /* ---------- Fase 3: Agendamentos & Alertas ---------- */
 .schedules-list {

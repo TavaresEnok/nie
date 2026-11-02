@@ -11,7 +11,16 @@
   let campaigns = $state([])
   let documents = $state([])
   let edges = $state([])
-  let meta = $state({ version: '', web_discovery: false, git_discovery: false, auth_required: false })
+  let meta = $state({
+    version: '',
+    web_discovery: false,
+    git_discovery: false,
+    mwmbl_discovery: false,
+    wayback_enabled: false,
+    software_heritage_discovery: false,
+    mentions_discovery: false,
+    auth_required: false
+  })
   let stats = $state(null)
   let selected = $state(null)
   let selectedID = $state('')
@@ -45,7 +54,9 @@
       max_bytes: 1073741824,
       min_domain_interval_seconds: 10,
       use_web_discovery: true,
-      use_git_discovery: false
+      use_git_discovery: false,
+      use_mwmbl_discovery: true,
+      use_swh_discovery: false
     }
   }
 
@@ -153,7 +164,9 @@
         max_bytes: Number(form.max_bytes),
         min_domain_interval_seconds: Number(form.min_domain_interval_seconds),
         use_web_discovery: !!form.use_web_discovery,
-        use_git_discovery: !!form.use_git_discovery
+        use_git_discovery: !!form.use_git_discovery,
+        use_mwmbl_discovery: !!form.use_mwmbl_discovery,
+        use_swh_discovery: !!form.use_swh_discovery
       }
       const c = await api('/api/campaigns', { method: 'POST', body: JSON.stringify(payload) })
       notice = 'Campanha criada e enfileirada com sucesso.'
@@ -398,9 +411,12 @@
     <button class:active={view === 'library'} onclick={() => showLibrary(filterCampaign)}>Biblioteca</button>
   </nav>
   <div class="top-actions">
-    <span class="version">v{meta.version || '0.2.0'}</span>
-    <span class="cap" class:on={meta.web_discovery} title="SearXNG">web</span>
-    <span class="cap" class:on={meta.git_discovery} title="GitHub">git</span>
+    <span class="version">v{meta.version || '0.2.1'}</span>
+    <span class="cap" class:on={meta.web_discovery} title="SearXNG (Descoberta Web)">searxng</span>
+    <span class="cap" class:on={meta.git_discovery} title="GitHub (Código)">git</span>
+    <span class="cap" class:on={meta.mwmbl_discovery} title="Mwmbl (Índice Livre)">mwmbl</span>
+    <span class="cap" class:on={meta.wayback_enabled} title="Wayback Machine (Preservação 404)">wayback</span>
+    <span class="cap" class:on={meta.mentions_discovery} title="Descoberta Contínua por Menções">menções</span>
     <button class="ghost small" onclick={() => (showSettings = !showSettings)}>API</button>
   </div>
 </header>
@@ -570,6 +586,14 @@
           <label class="check">
             <input type="checkbox" bind:checked={form.use_git_discovery} disabled={!meta.git_discovery} />
             <span>Descoberta Git {meta.git_discovery ? '(GitHub)' : '(desativada)'}</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={form.use_mwmbl_discovery} disabled={!meta.mwmbl_discovery} />
+            <span>Índice livre independente {meta.mwmbl_discovery ? '(Mwmbl)' : '(desativado)'}</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={form.use_swh_discovery} disabled={!meta.software_heritage_discovery} />
+            <span>Acervo de código histórico {meta.software_heritage_discovery ? '(Software Heritage)' : '(desativado)'}</span>
           </label>
           <div class="form-actions wide">
             <button class="primary" type="submit">Iniciar campanha</button>
@@ -771,9 +795,9 @@
           </div>
           <div class="graph-tree">
             {#each graphData.nodes as node}
-              <div class="tree-node depth-{node.depth}">
+              <div class="tree-node depth-{node.depth}" class:mention-node={node.type === 'mention'}>
                 <span class="depth">n{node.depth}</span>
-                <span class="cap on">{node.type}</span>
+                <span class="cap on" class:mention-cap={node.type === 'mention'}>{node.type === 'mention' ? 'menção técnica' : node.type}</span>
                 <strong>{node.label}</strong>
                 <span class="muted small">{node.domain}</span>
                 <span class="hash">{node.id}</span>

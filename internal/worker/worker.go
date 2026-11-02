@@ -29,9 +29,13 @@ type Worker struct {
 	store   *store.Store
 	storage *storage.Store
 	fetcher *crawler.Fetcher
+	router  *crawler.Router
 	robots  *crawler.Robots
 	searx   *discovery.SearXNG
 	github  *discovery.GitHub
+	mwmbl   *discovery.Mwmbl
+	wayback *discovery.WaybackMachine
+	swh     *discovery.SoftwareHeritage
 	cfg     config.Config
 	logger  *slog.Logger
 }
@@ -49,9 +53,49 @@ func (e *jobError) Unwrap() error { return e.err }
 
 func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robots *crawler.Robots,
 	searx *discovery.SearXNG, github *discovery.GitHub, cfg config.Config, logger *slog.Logger) *Worker {
+
+	router := crawler.NewRouter()
+	native := crawler.NewNativeExecutor(fetcher)
+	router.Register(native)
+
+	if cfg.ScrapyURL != "" {
+		router.Register(crawler.NewScrapyBridge(cfg.ScrapyURL, native))
+		logger.Info("executor Scrapy registrado", "url", cfg.ScrapyURL)
+	}
+	if cfg.Crawl4AIURL != "" {
+		router.Register(crawler.NewCrawl4AIBridge(cfg.Crawl4AIURL, native))
+		logger.Info("executor Crawl4AI registrado", "url", cfg.Crawl4AIURL)
+	}
+
+	var mwmbl *discovery.Mwmbl
+	if cfg.MwmblURL != "" {
+		mwmbl = discovery.NewMwmbl(cfg.MwmblURL)
+		logger.Info("descoberta Mwmbl habilitada", "url", cfg.MwmblURL)
+	}
+
+	var wayback *discovery.WaybackMachine
+	if cfg.WaybackEnabled {
+		wayback = discovery.NewWaybackMachine()
+	}
+
+	var swh *discovery.SoftwareHeritage
+	if cfg.SoftwareHeritageEnabled {
+		swh = discovery.NewSoftwareHeritage()
+	}
+
 	return &Worker{
-		store: st, storage: storage, fetcher: fetcher, robots: robots,
-		searx: searx, github: github, cfg: cfg, logger: logger,
+		store:   st,
+		storage: storage,
+		fetcher: fetcher,
+		router:  router,
+		robots:  robots,
+		searx:   searx,
+		github:  github,
+		mwmbl:   mwmbl,
+		wayback: wayback,
+		swh:     swh,
+		cfg:     cfg,
+		logger:  logger,
 	}
 }
 
@@ -165,6 +209,10 @@ func (w *Worker) process(ctx context.Context, job *domain.Job) error {
 		return w.processSearX(ctx, job)
 	case "discover_github":
 		return w.processGitHub(ctx, job)
+	case "discover_mwmbl":
+		return w.processMwmbl(ctx, job)
+	case "discover_swh":
+		return w.processSoftwareHeritage(ctx, job)
 	default:
 		return &jobError{err: fmt.Errorf("kind desconhecido: %s", job.Kind), permanent: true}
 	}
@@ -212,6 +260,12 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		return classifyFetchError(err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if (resp.StatusCode == 404 || resp.StatusCode == 410) && w.wayback != nil && w.cfg.WaybackEnabled {
+			if snap, wbErr := w.wayback.CheckAvailability(ctx, norm); wbErr == nil && snap != nil && snap.Available && snap.SnapshotURL != "" {
+				w.logger.Info("recurso recuperado via Wayback Machine", "original", norm, "snapshot", snap.SnapshotURL)
+				_, _ = w.store.EnqueueFetch(ctx, job.CampaignID, snap.SnapshotURL, job.Depth, norm, "wayback", 30)
+			}
+		}
 		switch {
 		case resp.StatusCode == 429:
 			return &jobError{err: &crawler.HTTPError{StatusCode: 429, URL: norm}, retryAfter: retryAfter(resp.Header, 60*time.Second)}
@@ -302,6 +356,21 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		if enqueued > 0 {
 			w.logger.Info("novas pistas", "from", finalNorm, "count", enqueued)
 		}
+
+		// V2.1: Descoberta de menções técnicas sem hyperlink (árvore que cresce sozinha)
+		if w.cfg.MentionsDiscoveryEnabled {
+			mentions := extract.ExtractMentions(ex.Text, 10)
+			for _, mention := range mentions {
+				_ = w.store.RecordDiscoveryEdge(ctx, job.CampaignID, finalNorm, "mention:"+mention, "mention", "menção técnica não linkada", job.Depth+1)
+				if strings.HasPrefix(mention, "RFC ") || strings.HasPrefix(mention, "NE8000") || strings.HasPrefix(mention, "CCR") || strings.HasPrefix(mention, "DM4") {
+					if w.searx != nil {
+						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_web", mention)
+					} else if w.mwmbl != nil {
+						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_mwmbl", mention)
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -366,6 +435,68 @@ func (w *Worker) processGitHub(ctx context.Context, job *domain.Job) error {
 		}
 	}
 	w.logger.Info("descoberta GitHub", "query", query, "results", len(results), "enqueued", enqueued)
+	return nil
+}
+
+func (w *Worker) processMwmbl(ctx context.Context, job *domain.Job) error {
+	if w.mwmbl == nil {
+		w.logger.Info("descoberta Mwmbl não configurada; job ignorado")
+		return nil
+	}
+	var payload struct {
+		Query string `json:"query"`
+	}
+	_ = json.Unmarshal(job.Payload, &payload)
+	if strings.TrimSpace(payload.Query) == "" {
+		return &jobError{err: errors.New("query de descoberta Mwmbl vazia"), permanent: true}
+	}
+	results, err := w.mwmbl.Search(ctx, payload.Query, 10)
+	if err != nil {
+		return err
+	}
+	enqueued := 0
+	for _, r := range results {
+		ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, r.URL, 0, "", "mwmbl", 25)
+		if err != nil {
+			w.logger.Warn("enfileirar resultado Mwmbl", "url", r.URL, "err", err)
+			continue
+		}
+		if ok {
+			enqueued++
+		}
+	}
+	w.logger.Info("descoberta Mwmbl concluída", "query", payload.Query, "results", len(results), "enqueued", enqueued)
+	return nil
+}
+
+func (w *Worker) processSoftwareHeritage(ctx context.Context, job *domain.Job) error {
+	if w.swh == nil {
+		w.logger.Info("descoberta Software Heritage não configurada; job ignorado")
+		return nil
+	}
+	var payload struct {
+		Query string `json:"query"`
+	}
+	_ = json.Unmarshal(job.Payload, &payload)
+	query := discovery.SanitizeQuery(payload.Query)
+	if query == "" {
+		return &jobError{err: errors.New("query Software Heritage vazia após higienização"), permanent: true}
+	}
+	results, err := w.swh.SearchOrigins(ctx, query, 10)
+	if err != nil {
+		return err
+	}
+	enqueued := 0
+	for _, r := range results {
+		ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, r.URL, 0, "", "software_heritage", 25)
+		if err != nil {
+			continue
+		}
+		if ok {
+			enqueued++
+		}
+	}
+	w.logger.Info("descoberta Software Heritage concluída", "query", query, "results", len(results), "enqueued", enqueued)
 	return nil
 }
 
