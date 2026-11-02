@@ -1,5 +1,13 @@
 # PACOTE DE PRESERVAÇÃO — PROJETO DE BUSCA AUTÔNOMA PARA TELECOM
 
+> **Documento histórico (30/10/2026).** Descreve a estrutura do ZIP original
+> (`Projeto_Busca_Autonoma_Backup_Completo.zip`), não a pasta `docs/` atual.
+> Neste repositório: `ARQUIVO_MESTRE.md` → [`ARQUIVO_MESTRE_V1.md`](ARQUIVO_MESTRE_V1.md),
+> `ARQUIVO_MESTRE.pdf` → [`ARQUIVO_MESTRE_V1.pdf`](ARQUIVO_MESTRE_V1.pdf),
+> `documentos/*.md` → esta pasta, `FONTES_E_PROJETOS.csv` →
+> [`../arquitetura/FONTES_E_PROJETOS.md`](../arquitetura/FONTES_E_PROJETOS.md);
+> `SHA256SUMS.txt` existe apenas dentro do ZIP. Ponto de entrada atual: [`../README.md`](../README.md).
+
 **Criado em:** 30/10/2026  
 **Finalidade:** manter a pesquisa, a concepção do produto, decisões de arquitetura, comparação de ferramentas, precedentes tecnológicos, dúvidas em aberto e o conteúdo original dos quatro anexos apresentados na conversa.
 

@@ -1,5 +1,9 @@
 # PLANO MESTRE V2 — NETWORK INTELLIGENCE ENGINE
 
+> **Variante editorial** do [`PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md`](PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md)
+> (mesma data e decisões, com diagramas extras na §15). Em caso de divergência,
+> vale o documento canônico.
+
 **Versão proposta:** 2.0  
 **Data:** 01/11/2026  
 **Status:** Arquitetura recomendada para implementação, ainda sem prova de produção.  

@@ -2,8 +2,14 @@
 
 **Versão:** 0.1  
 **Data:** 02/11/2026  
-**Status:** especificação de implementação do vertical slice  
-**Fonte arquitetural:** `PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md`
+**Status:** especificação do vertical slice da Fase 1 — **escopo histórico**  
+**Fonte arquitetural:** [`arquitetura/PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md`](arquitetura/PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md)
+
+> **Nota (02/11/2026):** o código já avançou além deste escopo (executores
+> Scrapy/Crawl4AI, claims/evidências, grafo, IA opcional). As exclusões da §1 e
+> da tabela da §4 sobre IA e crawler valem só para a Fase 1; as decisões
+> vigentes estão em [`DECISOES.md`](DECISOES.md) (ADR-007 e ADR-008). Os
+> critérios de aceite da §7 continuam válidos como teste de regressão.
 
 ## 1. Objetivo do MVP
 

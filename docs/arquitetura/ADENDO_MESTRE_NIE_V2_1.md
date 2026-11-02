@@ -3,7 +3,7 @@
 **Reintegração dos projetos open source já identificados e preservação do rastreamento recursivo**  
 **Data da revisão:** 02/11/2026  
 **Status:** proposta arquitetural revisada; **nenhuma integração, desempenho ou benchmark de execução está declarado como concluído**.  
-**Documentos de precedência:** `ARQUIVO_MESTRE.md` original (30/10), `PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md` (01/11) e arquivos originais no ZIP.
+**Documentos de precedência:** `ARQUIVO_MESTRE.md` original (30/10; neste repositório, [`../historico/ARQUIVO_MESTRE_V1.md`](../historico/ARQUIVO_MESTRE_V1.md)), `PLANO_MESTRE_NETWORK_INTELLIGENCE_ENGINE_V2.md` (01/11) e arquivos originais no ZIP.
 
 ## 1. Por que existe este adendo
 

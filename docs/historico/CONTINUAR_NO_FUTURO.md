@@ -1,5 +1,10 @@
 # PROMPT PARA RETOMAR O PROJETO EM OUTRA CONVERSA
 
+> **Documento histórico (30/10/2026).** Escrito antes de existir código. Hoje o
+> projeto já tem implementação; para retomar, comece por [`../README.md`](../README.md),
+> [`../DECISOES.md`](../DECISOES.md) e o `README.md` da raiz. `ARQUIVO_MESTRE.md`
+> corresponde a [`ARQUIVO_MESTRE_V1.md`](ARQUIVO_MESTRE_V1.md).
+
 Quero continuar a especificação e implementação do **Network Intelligence Engine**, também referido como **Git Eye + Web Eye + Autonomous Discovery Engine**.
 
 Leia o documento `ARQUIVO_MESTRE.md` integralmente e, se necessário, os quatro arquivos em `originais/`. É um arquivo de planejamento e pesquisa: **não confunda recursos propostos com funcionalidades já implementadas**.
