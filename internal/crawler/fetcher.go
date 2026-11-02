@@ -59,6 +59,15 @@ func (f *Fetcher) SetRedirectCheck(check func(ctx context.Context, u *url.URL) e
 	f.redirectCheck = check
 }
 
+type skipRedirectCheckKey struct{}
+
+// withoutRedirectCheck marca uma requisição para não consultar redirectCheck.
+// É usada pela própria busca do robots.txt: se ele redirecionar (ex.:
+// /robots.txt → /policy.txt), consultar o robots de novo seria reentrante.
+func withoutRedirectCheck(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipRedirectCheckKey{}, true)
+}
+
 func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("excesso de redirecionamentos")
@@ -68,7 +77,7 @@ func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 	}
 	// O próprio robots.txt pode redirecionar (http→https); não consultar o
 	// robots para ele, o que causaria recursão.
-	if f.redirectCheck != nil && req.URL.Path != "/robots.txt" {
+	if f.redirectCheck != nil && req.URL.Path != "/robots.txt" && req.Context().Value(skipRedirectCheckKey{}) == nil {
 		return f.redirectCheck(req.Context(), req.URL)
 	}
 	return nil
@@ -129,6 +138,13 @@ func NewFetcher(userAgent string, timeout time.Duration, maxHTML, maxPDF, maxTex
 }
 
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Response, error) {
+	return f.FetchWithLimit(ctx, rawURL, 0)
+}
+
+// FetchWithLimit baixa a URL com um teto adicional de bytes para esta
+// requisição (maxBytes > 0), além dos limites por tipo de documento. É o que
+// aplica o saldo do orçamento da campanha no executor nativo.
+func (f *Fetcher) FetchWithLimit(ctx context.Context, rawURL string, maxBytes int64) (*Response, error) {
 	u, _, err := urlutil.ParseNormalized(rawURL)
 	if err != nil {
 		return nil, err
@@ -156,6 +172,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Response, error) {
 
 	contentType := resp.Header.Get("Content-Type")
 	limit := f.limitFor(contentType)
+	if maxBytes > 0 && maxBytes < limit {
+		limit = maxBytes
+	}
 	if resp.ContentLength > 0 && resp.ContentLength > limit {
 		return nil, fmt.Errorf("%w: content-length %d > %d", ErrTooLarge, resp.ContentLength, limit)
 	}

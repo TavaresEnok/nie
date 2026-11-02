@@ -250,7 +250,27 @@ func (s *Store) RecordDocument(ctx context.Context, rec DocumentRecord) (string,
 		created = true
 	}
 
-	if created {
+	// Documento já conhecido mas ainda sem trechos (ex.: PDF escaneado guardado
+	// como extraction_pending): uma extração posterior (OCR/Docling) do mesmo
+	// SHA-256 preenche texto e trechos, sem nova coleta e sem duplicar o original.
+	fill := created
+	if !created && len(rec.Passages) > 0 {
+		var existing int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM passages WHERE document_id=$1::uuid`, docID).Scan(&existing); err != nil {
+			return "", false, err
+		}
+		if existing == 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE documents
+				SET text=$2, mime=$3, title=COALESCE(NULLIF($4, ''), title),
+				    metadata = metadata || $5::jsonb || '{"extraction_status":"done"}'::jsonb
+				WHERE id=$1::uuid`, docID, rec.Text, rec.MIME, rec.Title, meta); err != nil {
+				return "", false, fmt.Errorf("atualizar documento reprocessado: %w", err)
+			}
+			fill = true
+		}
+	}
+	if fill {
 		for _, p := range rec.Passages {
 			_, err := tx.Exec(ctx, `
 				INSERT INTO passages(document_id, ordinal, page, text)
@@ -586,6 +606,72 @@ func (s *Store) CampaignContext(ctx context.Context, campaignID string) (domain.
 		return b, 0, "", ErrNotFound
 	}
 	return b, used, query, err
+}
+
+// ReserveBytes reserva até want bytes do orçamento da campanha, de forma
+// atômica: a linha da campanha é travada, e o saldo considera os documentos já
+// gravados mais as reservas ainda válidas. Devolve o id da reserva, quanto foi
+// concedido e se o orçamento está esgotado de fato (documentos gravados já
+// atingiram max_bytes). granted=0 com exhausted=false significa que o saldo está
+// temporariamente reservado por downloads em andamento. A reserva expira
+// sozinha após ttl, caso o worker não a libere.
+func (s *Store) ReserveBytes(ctx context.Context, campaignID string, want int64, ttl time.Duration) (id, granted int64, exhausted bool, err error) {
+	if want <= 0 {
+		return 0, 0, false, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var maxBytes int64
+	if err := tx.QueryRow(ctx, `SELECT max_bytes FROM campaigns WHERE id=$1::uuid FOR UPDATE`, campaignID).Scan(&maxBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, 0, false, ErrNotFound
+		}
+		return 0, 0, false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM byte_reservations WHERE campaign_id=$1::uuid AND expires_at <= now()`, campaignID); err != nil {
+		return 0, 0, false, err
+	}
+	var used, reserved int64
+	if err := tx.QueryRow(ctx, `
+		SELECT
+		  COALESCE((SELECT sum(x.size) FROM (
+		      SELECT DISTINCT d.id, d.size FROM document_versions v JOIN documents d ON d.id=v.document_id
+		      WHERE v.campaign_id=$1::uuid) x), 0)::bigint,
+		  COALESCE((SELECT sum(bytes) FROM byte_reservations WHERE campaign_id=$1::uuid), 0)::bigint`,
+		campaignID).Scan(&used, &reserved); err != nil {
+		return 0, 0, false, err
+	}
+	if used >= maxBytes {
+		return 0, 0, true, tx.Commit(ctx)
+	}
+	granted = maxBytes - used - reserved
+	if granted > want {
+		granted = want
+	}
+	if granted <= 0 {
+		return 0, 0, false, tx.Commit(ctx)
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO byte_reservations(campaign_id, bytes, expires_at)
+		VALUES($1::uuid, $2, now() + $3::interval) RETURNING id`,
+		campaignID, granted, ttl).Scan(&id); err != nil {
+		return 0, 0, false, err
+	}
+	return id, granted, false, tx.Commit(ctx)
+}
+
+// ReleaseBytes libera uma reserva. Os bytes de fato gravados já contam pelo
+// documento, então a liberação nunca devolve orçamento consumido.
+func (s *Store) ReleaseBytes(ctx context.Context, reservationID int64) error {
+	if reservationID == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM byte_reservations WHERE id=$1`, reservationID)
+	return err
 }
 
 // Throttle retorna (próximaJanela, permitido). Quando permitido=false, o job deve ser adiado.

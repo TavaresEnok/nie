@@ -72,7 +72,7 @@ func (n *NativeExecutor) Name() string { return "native" }
 
 func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*domain.FetchResult, error) {
 	start := time.Now()
-	resp, err := n.fetcher.Fetch(ctx, task.URL)
+	resp, err := n.fetcher.FetchWithLimit(ctx, task.URL, task.MaxBytes)
 	duration := time.Since(start)
 
 	if err != nil {

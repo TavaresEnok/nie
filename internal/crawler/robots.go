@@ -72,7 +72,7 @@ func (r *Robots) load(ctx context.Context, u *url.URL) robotsEntry {
 	robotsURL := u.Scheme + "://" + u.Host + "/robots.txt"
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	resp, err := r.fetcher.Fetch(ctx, robotsURL)
+	resp, err := r.fetcher.Fetch(withoutRedirectCheck(ctx), robotsURL)
 	if err != nil {
 		entry := robotsEntryFromError(err)
 		r.logger.Warn("robots.txt não pôde ser lido", "host", u.Host, "bloqueado", entry.denyAll, "err", err)

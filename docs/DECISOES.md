@@ -183,3 +183,33 @@ que não seguem esses padrões ainda podem ser mal classificadas. Uma prova
 semântica exige leitura da proposição (modelo ou revisão humana) e continua
 pendente, assim como o ciclo autônomo, o isolamento de rede dos workers, o
 PostgreSQL 18 e a campanha de ponta a ponta.
+
+## ADR-013 — Afirmações por oração, firmware explícito e biblioteca sem perdas (auditoria 5)
+
+**Status:** aceito (implementado em 02/11/2026)  
+**Contexto:** a quinta auditoria mostrou que flags calculadas sobre o trecho
+inteiro misturavam afirmações: a negação do Telnet refutava o BGP, "suporta
+BGP" + "guia de PPPoE" virava suporte conjunto, e o firmware VRP v8 era
+inferido do modelo NE8000. Também apontou que a migração 0006 apagava
+evidências em cascata.  
+**Decisão:**
+- o trecho é dividido em orações (`splitClauses`); cada recurso pedido é
+  avaliado só nas orações que o citam. Suporte conjunto exige uma oração que
+  afirme todos os recursos pedidos;
+- a release só conta quando citada explicitamente (`firmwareAliases`); o SO
+  deduzido pelo classificador é heurístico e nunca prova a versão;
+- a migração 0006 mescla duplicatas, sem apagar evidências nem contradições,
+  e registra a fusão em `claim_merges`. Ela foi reescrita antes de ser aplicada
+  a qualquer banco real (o banco `nie` local estava na 0005);
+- orçamento de bytes por reserva atômica (`byte_reservations`, migração 0007),
+  aplicada em todos os executores;
+- documento `extraction_pending` é preenchido quando o mesmo SHA-256 é
+  reprocessado;
+- a busca do robots.txt não aciona a verificação de robots nos próprios
+  redirecionamentos.  
+**Limites:** as orações são separadas por pontuação e conjunções, e sujeito e
+objeto não são identificados de fato. Uma frase longa com vários recursos e uma
+negação parcial ainda pode ser mal classificada. O modelo proposto pela
+auditoria (`Claim(subject, predicate, object, …)` extraído com apoio de LLM e
+verificado estruturalmente) continua pendente. Também falta versionar as
+extrações (`extraction_runs`) para reprocessar documentos que já têm trechos.

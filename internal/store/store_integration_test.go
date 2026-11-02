@@ -807,8 +807,9 @@ func TestP1_ConcurrentSaveClaimsNeverDuplicates(t *testing.T) {
 	}
 }
 
-// A migração 0006 limpa duplicatas antigas, preferindo o claim validado.
-func TestP1_Migration0006DedupesExistingClaims(t *testing.T) {
+// A migração 0006 mescla duplicatas antigas no claim validado (ou no mais
+// antigo) SEM apagar evidências nem contradições, e registra a fusão.
+func TestP1_Migration0006MergesDuplicatesWithoutLosingEvidence(t *testing.T) {
 	st, ctx := newTestStore(t)
 	camp, err := st.CreateCampaign(ctx, "migracao "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
 		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
@@ -816,31 +817,203 @@ func TestP1_Migration0006DedupesExistingClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanupCampaign(t, st, camp.ID)
+	docID, _, err := st.RecordDocument(ctx, DocumentRecord{
+		SHA256: hashFor("mig" + fmt.Sprint(time.Now().UnixNano())), MIME: "text/html", Size: 1, Text: "x",
+		CampaignID: camp.ID, URL: "https://m.example/p", NormalizedURL: "https://m.example/p", Domain: "m.example", StatusCode: 200,
+		Passages: []domain.Passage{{Ordinal: 0, Text: "x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = st.Pool().Exec(context.Background(), `DELETE FROM documents WHERE id=$1::uuid`, docID) })
 
 	if _, err := st.Pool().Exec(ctx, `DROP INDEX IF EXISTS claims_campaign_title_uq`); err != nil {
 		t.Fatal(err)
 	}
+	// Três claims com o mesmo título, cada um com duas evidências próprias e
+	// uma contradição entre elas: o cenário que a versão anterior destruía.
+	var validatedID string
 	for i, validation := range []string{"untested", "lab_validated", "untested"} {
-		if _, err := st.Pool().Exec(ctx, `
+		var claimID string
+		if err := st.Pool().QueryRow(ctx, `
 			INSERT INTO claims(campaign_id, title, statement, operational_validation, created_at)
-			VALUES($1::uuid, 'Duplicado', $2, $3, now() + ($4 || ' seconds')::interval)`,
-			camp.ID, fmt.Sprintf("v%d", i), validation, fmt.Sprint(i)); err != nil {
+			VALUES($1::uuid, 'Duplicado', $2, $3, now() + ($4 || ' seconds')::interval) RETURNING id::text`,
+			camp.ID, fmt.Sprintf("v%d", i), validation, fmt.Sprint(i)).Scan(&claimID); err != nil {
+			t.Fatal(err)
+		}
+		if validation == "lab_validated" {
+			validatedID = claimID
+		}
+		var evA, evB string
+		for j, dst := range []*string{&evA, &evB} {
+			if err := st.Pool().QueryRow(ctx, `
+				INSERT INTO evidence(claim_id, document_id, stance, excerpt) VALUES($1::uuid, $2::uuid, 'supports', $3) RETURNING id::text`,
+				claimID, docID, fmt.Sprintf("claim %d evidência %d", i, j)).Scan(dst); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.Pool().Exec(ctx, `
+			INSERT INTO contradictions(claim_id, evidence_a_id, evidence_b_id, explanation) VALUES($1::uuid, $2::uuid, $3::uuid, 'x')`,
+			claimID, evA, evB); err != nil {
 			t.Fatal(err)
 		}
 	}
+	count := func(q string) int {
+		var n int
+		if err := st.Pool().QueryRow(ctx, q, camp.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	const evQ = `SELECT count(*) FROM evidence e JOIN claims c ON c.id=e.claim_id WHERE c.campaign_id=$1::uuid`
+	const ctQ = `SELECT count(*) FROM contradictions x JOIN claims c ON c.id=x.claim_id WHERE c.campaign_id=$1::uuid`
+	evBefore, ctBefore := count(evQ), count(ctQ)
+
 	sqlText, err := migrationsFS.ReadFile("migrations/0006_claims_unique_title.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Pool().Exec(ctx, string(sqlText)); err != nil {
-		t.Fatalf("migração 0006 sobre dados duplicados: %v", err)
-	}
-	var n int
-	var validation string
-	if err := st.Pool().QueryRow(ctx, `SELECT count(*), max(operational_validation) FROM claims WHERE campaign_id=$1::uuid`, camp.ID).Scan(&n, &validation); err != nil {
+	tx, err := st.Pool().Begin(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || validation != "lab_validated" {
-		t.Errorf("após a migração: %d claims, validação=%q; quer 1 claim lab_validated", n, validation)
+	for _, stmt := range splitStatements(string(sqlText)) {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("migração 0006 sobre dados duplicados: %v", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := count(`SELECT count(*) FROM claims WHERE campaign_id=$1::uuid`); n != 1 {
+		t.Fatalf("após a migração: %d claims, quer 1", n)
+	}
+	var kept string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM claims WHERE campaign_id=$1::uuid`, camp.ID).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept != validatedID {
+		t.Errorf("o claim mantido deveria ser o validado em bancada (%s), obteve %s", validatedID, kept)
+	}
+	if evAfter, ctAfter := count(evQ), count(ctQ); evAfter != evBefore || ctAfter != ctBefore {
+		t.Errorf("evidências %d→%d e contradições %d→%d: a mesclagem não pode perder registros", evBefore, evAfter, ctBefore, ctAfter)
+	}
+	if n := count(`SELECT count(*) FROM claim_merges WHERE campaign_id=$1::uuid`); n != 2 {
+		t.Errorf("claim_merges deveria registrar 2 fusões, obteve %d", n)
+	}
+}
+
+// Reserva atômica: workers concorrentes nunca recebem, somados, mais bytes do
+// que o saldo da campanha; liberar devolve o saldo e reservas expiradas não contam.
+func TestP1_ConcurrentByteReservationsNeverExceedBudget(t *testing.T) {
+	st, ctx := newTestStore(t)
+	const MiB = int64(1 << 20)
+	camp, err := st.CreateCampaign(ctx, "reserva "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 50, MaxDomains: 5, MaxBytes: 10 * MiB, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+
+	const workers = 12
+	type result struct {
+		id, granted int64
+		err         error
+	}
+	results := make(chan result, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			id, granted, _, err := st.ReserveBytes(ctx, camp.ID, 3*MiB, time.Minute)
+			results <- result{id, granted, err}
+		}()
+	}
+	close(start)
+	var total int64
+	var ids []int64
+	for i := 0; i < workers; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("ReserveBytes: %v", r.err)
+		}
+		total += r.granted
+		if r.id != 0 {
+			ids = append(ids, r.id)
+		}
+	}
+	if total != 10*MiB {
+		t.Fatalf("%d reservas simultâneas de 3 MiB concederam %d bytes; quer exatamente o saldo de 10 MiB", workers, total)
+	}
+
+	// Saldo totalmente reservado: nova reserva espera (não é "esgotado").
+	if _, granted, exhausted, _ := st.ReserveBytes(ctx, camp.ID, MiB, time.Minute); granted != 0 || exhausted {
+		t.Errorf("com saldo reservado: granted=%d exhausted=%v; quer 0/false", granted, exhausted)
+	}
+	// Liberar devolve o saldo.
+	if err := st.ReleaseBytes(ctx, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, granted, _, _ := st.ReserveBytes(ctx, camp.ID, 3*MiB, time.Minute); granted <= 0 {
+		t.Errorf("após liberar, a reserva deveria ser concedida")
+	}
+	// Reservas expiradas deixam de contar.
+	if _, err := st.Pool().Exec(ctx, `UPDATE byte_reservations SET expires_at=now()-interval '1 second' WHERE campaign_id=$1::uuid`, camp.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, granted, _, _ := st.ReserveBytes(ctx, camp.ID, 10*MiB, time.Minute); granted != 10*MiB {
+		t.Errorf("reservas expiradas não devem contar: granted=%d", granted)
+	}
+}
+
+// Documento guardado sem texto (extraction_pending) recebe texto e trechos quando
+// o mesmo SHA-256 é reprocessado (OCR/Docling), sem duplicar e sem nova coleta.
+func TestP1_PendingDocumentIsFilledOnReprocessing(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "reprocesso "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/scan.pdf"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+	sha := hashFor("scan" + fmt.Sprint(time.Now().UnixNano()))
+	base := DocumentRecord{SHA256: sha, MIME: "application/pdf", Size: 100, CampaignID: camp.ID,
+		URL: "https://seed.example/scan.pdf", NormalizedURL: "https://seed.example/scan.pdf", Domain: "seed.example", StatusCode: 200}
+
+	pending := base
+	pending.Metadata = map[string]any{"extraction_status": "pending"}
+	docID, _, err := st.RecordDocument(ctx, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = st.Pool().Exec(context.Background(), `DELETE FROM documents WHERE id=$1::uuid`, docID) })
+
+	ocr := base
+	ocr.Text = "display bgp peer extraído por OCR"
+	ocr.Metadata = map[string]any{"extractor": "ocr-test"}
+	ocr.Passages = []domain.Passage{{Ordinal: 0, Text: ocr.Text}}
+	for i := 0; i < 2; i++ { // a segunda chamada não pode duplicar trechos
+		id, _, err := st.RecordDocument(ctx, ocr)
+		if err != nil || id != docID {
+			t.Fatalf("reprocessamento #%d: id=%s err=%v (quer o mesmo documento %s)", i+1, id, err, docID)
+		}
+	}
+
+	var text, status, extractor string
+	var passages int
+	if err := st.Pool().QueryRow(ctx, `
+		SELECT d.text, d.metadata->>'extraction_status', d.metadata->>'extractor',
+		       (SELECT count(*) FROM passages p WHERE p.document_id=d.id)
+		FROM documents d WHERE d.id=$1::uuid`, docID).Scan(&text, &status, &extractor, &passages); err != nil {
+		t.Fatal(err)
+	}
+	if text != ocr.Text || status != "done" || extractor != "ocr-test" || passages != 1 {
+		t.Errorf("após reprocessar: text=%q status=%q extractor=%q trechos=%d", text, status, extractor, passages)
+	}
+	res, err := st.Search(ctx, "display bgp peer", camp.ID, 5)
+	if err != nil || len(res) == 0 {
+		t.Errorf("o texto reprocessado deveria ser encontrável na busca: %v err=%v", res, err)
 	}
 }

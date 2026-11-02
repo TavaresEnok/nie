@@ -250,12 +250,10 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		classification := classifier.Classify(p.Snippet, p.Domain)
 		lowerSnippet := strings.ToLower(p.Snippet)
 
-		// Determina o fabricante e OS da passagem
+		// Fabricante da passagem (o SO do classificador é inferido e não é usado como prova)
 		vendorName := ""
-		detectedOS := ""
 		if len(classification.Vendors) > 0 {
 			vendorName = classification.Vendors[0].Name
-			detectedOS = classification.Vendors[0].OS
 		}
 
 		// 1. Vendor Match & Mismatch
@@ -273,22 +271,17 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 			}
 		}
 
-		// 2. Firmware Match & Mismatch
+		// 2. Firmware: só a menção explícita da release no trecho conta. O
+		// classificador infere uma família de SO a partir do modelo (NE8000 → VRP),
+		// mas essa inferência é heurística e nunca prova a versão (auditoria V5).
 		firmwareMatch := false
 		versionMismatch := false
-		if len(req.Firmwares) > 0 {
-			for _, fw := range req.Firmwares {
-				reqLower := strings.ToLower(fw)
-				detLower := strings.ToLower(detectedOS)
-				snipLower := lowerSnippet
-				if (detLower != "" && strings.Contains(detLower, reqLower)) || strings.Contains(snipLower, reqLower) {
-					firmwareMatch = true
-				}
-				// Detecção de versões incompatíveis
-				if (strings.Contains(reqLower, "v7") && (strings.Contains(detLower, "v6") || strings.Contains(snipLower, "v6") || strings.Contains(snipLower, "routeros 6"))) ||
-					(strings.Contains(reqLower, "v8") && (strings.Contains(detLower, "v5") || strings.Contains(snipLower, "v5") || strings.Contains(snipLower, "vrpv5"))) {
-					versionMismatch = true
-				}
+		for _, fw := range req.Firmwares {
+			if mentionsFirmware(lowerSnippet, fw) {
+				firmwareMatch = true
+			}
+			if mentionsConflictingFirmware(lowerSnippet, fw) {
+				versionMismatch = true
 			}
 		}
 
@@ -303,35 +296,24 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 			}
 		}
 
-		// 4. Feature Match (deve conter TODAS as features requeridas, não colapsa BGP, RADIUS e PPPoE!)
-		featureMatch := true
-		if len(req.Features) > 0 {
-			for _, f := range req.Features {
-				if !snippetHasFeature(f, p.Snippet, lowerSnippet) {
-					featureMatch = false
-					break
-				}
-			}
-		} else {
-			featureMatch = false
-		}
+		// 4. Recursos e stance, por oração: um recurso é sustentado só pela
+		// oração que o afirma, e refutado só pela oração que o nega; recursos em
+		// orações diferentes não provam funcionamento conjunto.
+		assertion := analyzeAssertion(p.Snippet, req.Features, classification.CLICommands)
+		featureMatch := assertion.CoAsserted || assertion.Refuted
 
-		// Determina o stance com rigor epistemológico:
 		//   - outro fabricante ou release não prova nem refuta o cenário pedido;
-		//   - negação explícita ("does not support", "não suporta", "no soporta")
-		//     ou palavra de obsolescência refuta; se vale para o equipamento
-		//     pedido é decidido por ResolveClaimStatus, pelos campos de escopo;
-		//   - enunciado condicional/parcial ou que só lista os termos não afirma
-		//     o recurso por inteiro: é menção.
-		stance := "supports"
+		//   - refutação: decide-se a aplicabilidade em ResolveClaimStatus, pelos
+		//     campos de escopo;
+		//   - sem oração que afirme todos os recursos pedidos: é menção.
+		stance := "mentions"
 		switch {
 		case vendorMismatch || versionMismatch:
 			stance = "mentions"
-		case snippetRefutes(lowerSnippet):
+		case assertion.Refuted:
 			stance = "refutes"
-		case !featureMatch || snippetIsQualified(lowerSnippet) ||
-			!assertsContent(lowerSnippet, len(classification.CLICommands) > 0):
-			stance = "mentions"
+		case assertion.CoAsserted:
+			stance = "supports"
 		}
 
 		// Identifica o tópico atômico do claim

@@ -277,6 +277,26 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 
 	perDocument := documentByteLimit(w.cfg.MaxHTMLBytes, w.cfg.MaxPDFBytes,
 		strings.HasSuffix(strings.ToLower(u.Path), ".pdf"), budget.MaxBytes, used)
+	// Reserva atômica do saldo: workers concorrentes não ultrapassam max_bytes.
+	// A reserva vale até o documento ser gravado (quando passa a contar como
+	// consumo) e expira sozinha se o worker cair.
+	reservationID, granted, exhausted, err := w.store.ReserveBytes(ctx, job.CampaignID, perDocument, 2*w.cfg.RequestTimeout+time.Minute)
+	if err != nil {
+		return err
+	}
+	if exhausted {
+		w.logger.Info("orçamento de bytes esgotado; job ignorado", "campaign", job.CampaignID)
+		return nil
+	}
+	if granted <= 0 {
+		// Saldo ocupado por downloads em andamento: tenta de novo depois, sem perder a URL.
+		if err := w.store.DeferJob(ctx, job.ID, time.Now().Add(30*time.Second)); err != nil {
+			return err
+		}
+		return errDeferred
+	}
+	defer func() { _ = w.store.ReleaseBytes(context.Background(), reservationID) }()
+	perDocument = granted
 
 	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, perDocument)
 	fetchResult, err := w.router.Execute(ctx, task)
