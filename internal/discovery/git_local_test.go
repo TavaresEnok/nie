@@ -67,6 +67,32 @@ add name=bgp-peer-isp remote.address=192.0.2.1/32 .as=65100 local.as=65000 routi
 		t.Errorf("Revisão não deveria ser vazia")
 	}
 
+	// 4. Cria mock de .git com commit SHA verificável de 40 caracteres (P1-07)
+	expectedSHA := "360d9b7b577eb65984ff7f7115333ec8090c3062"
+	gitDir := filepath.Join(tempDir, ".git")
+	refsDir := filepath.Join(gitDir, "refs", "heads")
+	if err := os.MkdirAll(refsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refsDir, "main"), []byte(expectedSHA+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Executa nova busca e verifica que Revision agora é o SHA real do commit, NÃO a string "HEAD"
+	matchesWithGit, err := finder.Search(ctx, "peer 10.0.0.2", 10)
+	if err != nil {
+		t.Fatalf("Search com git falhou: %v", err)
+	}
+	if len(matchesWithGit) == 0 {
+		t.Fatalf("Nenhum match encontrado")
+	}
+	if matchesWithGit[0].Revision != expectedSHA {
+		t.Errorf("P1-07: Esperava commit SHA '%s', obteve '%s'", expectedSHA, matchesWithGit[0].Revision)
+	}
+
 	// Busca por "bgp-peer-isp" que só existe no .rsc
 	matchesRSC, err := finder.Search(ctx, "bgp-peer-isp", 10)
 	if err != nil {

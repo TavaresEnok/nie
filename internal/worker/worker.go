@@ -255,7 +255,17 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		return nil
 	}
 
-	task := crawler.BuildFetchTask(job.CampaignID, norm, "http", "", budget.MaxBytes)
+	mode := "http"
+	executor := ""
+	lowerURL := strings.ToLower(norm)
+	if strings.Contains(lowerURL, "/#/") || strings.Contains(lowerURL, "/app/") || strings.Contains(lowerURL, "/portal/") || strings.Contains(lowerURL, "/dashboard/") {
+		mode = "browser"
+		executor = "crawl4ai"
+	} else if strings.Contains(lowerURL, "/docs/") || strings.Contains(lowerURL, "/manual/") || strings.Contains(lowerURL, "/wiki/") || strings.Contains(lowerURL, "/catalog/") || strings.Contains(lowerURL, "/reference/") {
+		executor = "scrapy"
+	}
+
+	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, budget.MaxBytes)
 	fetchResult, err := w.router.Execute(ctx, task)
 	if err != nil {
 		return classifyFetchError(err)
@@ -590,7 +600,7 @@ func crawlableLink(raw string) bool {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".css", ".js", ".mjs",
 		".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".exe", ".msi", ".dmg",
 		".iso", ".img", ".bin", ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".woff", ".woff2",
-		".ttf", ".eot", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx":
+		".ttf", ".eot":
 		return false
 	}
 	return true
@@ -609,7 +619,7 @@ func computeFrontierPriority(link string, depth int, campaignQuery string) int {
 		}
 	}
 
-	docIndicators := []string{"doc", "manual", "guide", "cli", "command", "config", "spec", "telecom", "firmware", "pdf", "rfc", "support"}
+	docIndicators := []string{"doc", "manual", "guide", "cli", "command", "config", "spec", "telecom", "firmware", "pdf", "rfc", "support", "architecture", "whitepaper"}
 	for _, ind := range docIndicators {
 		if strings.Contains(lowerURL, ind) {
 			score -= 10
@@ -639,13 +649,28 @@ func isTechnicalTelecomKeyword(m string) bool {
 	if len(upper) < 3 {
 		return false
 	}
+	// Prefixos de telecom / infraestrutura
 	prefixes := []string{
 		"RFC", "NE8000", "CCR", "DM4", "AN5516", "AN6000", "MA5800", "MA5608T",
 		"OLT", "ASR", "7600", "MX", "PTX", "VRP", "ROUTEROS", "IOS-XR", "JUNOS",
 		"BGP", "PPPOE", "VLAN", "MPLS", "OSPF", "FIBERHOME", "HUAWEI", "MIKROTIK", "CISCO", "DATACOM",
+		"SONICWALL", "FORTINET", "PALOALTO", "CHECKPOINT", "ZTE", "VSOL", "DELL", "ARUBA", "JUNIPER",
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(upper, p) {
+			return true
+		}
+	}
+	// Aceita identificadores técnicos alfanuméricos com hífen/versão (ex: CVE-2024, V7.12, RFC-8950, etc.)
+	if strings.Contains(upper, "-") || strings.Contains(upper, ".") || strings.Contains(upper, "_") {
+		hasDigit := false
+		for _, r := range upper {
+			if r >= '0' && r <= '9' {
+				hasDigit = true
+				break
+			}
+		}
+		if hasDigit && len(upper) >= 4 {
 			return true
 		}
 	}

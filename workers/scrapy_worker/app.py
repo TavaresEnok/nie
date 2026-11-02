@@ -5,13 +5,40 @@ import socket
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
-from fastapi import FastAPI, HTTPException
+try:
+    from fastapi import FastAPI, HTTPException
+except ImportError:
+    from starlette.applications import Starlette
+    from starlette.exceptions import HTTPException
+
+    class FastAPI(Starlette):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("title", None)
+            kwargs.pop("version", None)
+            super().__init__(*args, **kwargs)
+
+        def post(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def get(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
 from pydantic import BaseModel
 import requests
-import scrapy
-from scrapy.http import HtmlResponse
-from scrapy.linkextractors import LinkExtractor
 from bs4 import BeautifulSoup
+
+SCRAPY_AVAILABLE = False
+try:
+    import scrapy
+    from scrapy.http import HtmlResponse
+    from scrapy.linkextractors import LinkExtractor
+    SCRAPY_AVAILABLE = True
+except ImportError:
+    SCRAPY_AVAILABLE = False
 
 app = FastAPI(title="NIE Scrapy Worker Bridge", version="2.1.0")
 
@@ -27,16 +54,34 @@ class CrawlResponse(BaseModel):
     status_code: int
     content_type: str
     text: str
+    raw_html: str
     extracted_links: List[str]
+
+BLOCKED_HOSTNAMES = {
+    "localhost",
+    "metadata.google.internal",
+    "metadata.internal",
+    "instance-data",
+    "host.docker.internal",
+}
 
 def is_public_ip(ip_str: str) -> bool:
     try:
         ip = ipaddress.ip_address(ip_str)
         if not ip.is_global:
             return False
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
             return False
         if str(ip).startswith("169.254."):
+            return False
+        if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
             return False
         return True
     except ValueError:
@@ -50,16 +95,29 @@ def validate_public_target(url: str):
     if not host:
         raise HTTPException(status_code=400, detail="Hostname inválido")
 
+    lower_host = host.lower()
+    if lower_host in BLOCKED_HOSTNAMES or lower_host.endswith(".local") or lower_host.endswith(".internal"):
+        raise HTTPException(status_code=403, detail=f"Hostname {host} bloqueado por política de egress")
+
     try:
-        addr_info = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-        if not addr_info:
-            raise HTTPException(status_code=400, detail="Não foi possível resolver o hostname")
-        for family, socktype, proto, canonname, sockaddr in addr_info:
-            ip_str = sockaddr[0]
-            if not is_public_ip(ip_str):
-                raise HTTPException(status_code=403, detail=f"Destino {ip_str} bloqueado por política de egress e SSRF")
-    except socket.gaierror as e:
-        raise HTTPException(status_code=400, detail=f"Erro de resolução DNS: {e}")
+        ip = ipaddress.ip_address(host)
+        if not is_public_ip(str(ip)):
+            raise HTTPException(status_code=403, detail=f"IP {host} bloqueado por política de egress e SSRF")
+    except ValueError:
+        try:
+            addr_info = socket.getaddrinfo(
+                host,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                proto=socket.IPPROTO_TCP
+            )
+            if not addr_info:
+                raise HTTPException(status_code=400, detail="Não foi possível resolver o hostname")
+            for _, _, _, _, sockaddr in addr_info:
+                ip_str = sockaddr[0]
+                if not is_public_ip(ip_str):
+                    raise HTTPException(status_code=403, detail=f"Destino {ip_str} bloqueado por política de egress e SSRF")
+        except socket.gaierror as e:
+            raise HTTPException(status_code=400, detail=f"Erro de resolução DNS: {e}")
 
 @app.get("/health")
 def health():
@@ -67,8 +125,8 @@ def health():
         "status": "ok",
         "worker": "scrapy",
         "version": "2.1.0",
-        "scrapy_version": scrapy.__version__,
-        "capabilities": ["http", "https", "robots_aware", "ssrf_guard"]
+        "scrapy_version": scrapy.__version__ if SCRAPY_AVAILABLE else "fallback_bs4",
+        "capabilities": ["http", "https", "robots_aware", "ssrf_guard", "raw_content_preservation"]
     }
 
 @app.post("/crawl", response_model=CrawlResponse)
@@ -105,26 +163,34 @@ def crawl(req: CrawlRequest):
     if len(raw_bytes) > req.max_bytes:
         raise HTTPException(status_code=413, detail="Tamanho de conteúdo excedeu max_bytes")
 
-    # Utiliza Scrapy HtmlResponse e Scrapy LinkExtractor nativo
-    scrapy_resp = HtmlResponse(url=curr_url, body=raw_bytes, encoding="utf-8")
-    extractor = LinkExtractor(
-        deny_extensions=['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'zip', 'tar', 'gz', 'exe', 'bin', 'mp4'],
-        tags=('a', 'area'),
-        attrs=('href',)
-    )
-    extracted_scrapy_links = extractor.extract_links(scrapy_resp)
+    raw_html_str = raw_bytes.decode("utf-8", errors="replace")
 
-    soup = BeautifulSoup(raw_bytes.decode("utf-8", errors="replace"), "html.parser")
+    links = []
+    if SCRAPY_AVAILABLE:
+        # Utiliza Scrapy HtmlResponse e Scrapy LinkExtractor nativo
+        scrapy_resp = HtmlResponse(url=curr_url, body=raw_bytes, encoding="utf-8")
+        extractor = LinkExtractor(
+            deny_extensions=['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'zip', 'tar', 'gz', 'exe', 'bin', 'mp4'],
+            tags=('a', 'area'),
+            attrs=('href',)
+        )
+        for l in extractor.extract_links(scrapy_resp):
+            full_url = l.url.strip()
+            parsed = urlparse(full_url)
+            if parsed.scheme in ("http", "https"):
+                links.append(full_url)
+
+    soup = BeautifulSoup(raw_html_str, "html.parser")
     for s in soup(["script", "style", "noscript", "svg", "header", "footer"]):
         s.extract()
     text = soup.get_text(separator="\n", strip=True)
 
-    links = []
-    for l in extracted_scrapy_links:
-        full_url = l.url.strip()
-        parsed = urlparse(full_url)
-        if parsed.scheme in ("http", "https"):
-            links.append(full_url)
+    if not SCRAPY_AVAILABLE:
+        for a in soup.find_all("a", href=True):
+            full_url = urljoin(curr_url, a["href"].strip())
+            parsed = urlparse(full_url)
+            if parsed.scheme in ("http", "https"):
+                links.append(full_url)
 
     seen = set()
     deduped_links = []
@@ -139,6 +205,7 @@ def crawl(req: CrawlRequest):
         status_code=resp.status_code,
         content_type=content_type,
         text=text,
+        raw_html=raw_html_str,
         extracted_links=deduped_links[:200],
     )
 

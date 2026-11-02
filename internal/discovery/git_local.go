@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -24,6 +25,47 @@ type LocalFileMatch struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+// resolveCommitSHA resolve o SHA-1 verificável do commit do repositório local.
+// Atende ao P1-07 da auditoria, substituindo a string literal "HEAD" pelo SHA real do commit.
+func (g *GitLocalFinder) resolveCommitSHA(ctx context.Context) string {
+	if g.baseDir == "" {
+		return "uncommitted"
+	}
+
+	// 1. Tenta executar git rev-parse HEAD
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = g.baseDir
+	out, err := cmd.Output()
+	if err == nil {
+		sha := strings.TrimSpace(string(out))
+		if len(sha) == 40 {
+			return sha
+		}
+	}
+
+	// 2. Fallback direto via leitura do sistema de arquivos (.git/HEAD e .git/refs)
+	gitDir := filepath.Join(g.baseDir, ".git")
+	headPath := filepath.Join(gitDir, "HEAD")
+	headData, err := os.ReadFile(headPath)
+	if err == nil {
+		headContent := strings.TrimSpace(string(headData))
+		if strings.HasPrefix(headContent, "ref: ") {
+			refRelative := strings.TrimSpace(strings.TrimPrefix(headContent, "ref: "))
+			refPath := filepath.Join(gitDir, filepath.FromSlash(refRelative))
+			if refData, refErr := os.ReadFile(refPath); refErr == nil {
+				sha := strings.TrimSpace(string(refData))
+				if len(sha) == 40 {
+					return sha
+				}
+			}
+		} else if len(headContent) == 40 {
+			return headContent
+		}
+	}
+
+	return "uncommitted"
+}
+
 // Search scans local git repositories or config folders for target query keywords.
 func (g *GitLocalFinder) Search(ctx context.Context, query string, maxResults int) ([]LocalFileMatch, error) {
 	if maxResults <= 0 {
@@ -40,6 +82,8 @@ func (g *GitLocalFinder) Search(ctx context.Context, query string, maxResults in
 	if len(terms) == 0 {
 		return nil, nil
 	}
+
+	commitSHA := g.resolveCommitSHA(ctx)
 
 	var results []LocalFileMatch
 	err := filepath.WalkDir(g.baseDir, func(path string, d fs.DirEntry, err error) error {
@@ -102,7 +146,7 @@ func (g *GitLocalFinder) Search(ctx context.Context, query string, maxResults in
 				Path:     path,
 				Line:     lineNum,
 				Snippet:  fmt.Sprintf("...%s...", snippet),
-				Revision: "HEAD",
+				Revision: commitSHA,
 			})
 			if len(results) >= maxResults {
 				return filepath.SkipAll

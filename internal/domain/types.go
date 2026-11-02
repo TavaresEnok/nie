@@ -196,18 +196,26 @@ type OriginCluster struct {
 }
 
 type Evidence struct {
-	ID            string    `json:"id"`
-	ClaimID       string    `json:"claim_id"`
-	DocumentID    string    `json:"document_id"`
-	PassageID     *int64    `json:"passage_id,omitempty"`
-	ClusterID     *string   `json:"cluster_id,omitempty"`
-	Stance        string    `json:"stance"` // supports, refutes, mentions
-	Excerpt       string    `json:"excerpt"`
-	Page          *int      `json:"page,omitempty"`
-	Confidence    float32   `json:"confidence"`
-	IsOfficialDoc bool      `json:"is_official_doc"`
-	Notes         string    `json:"notes,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	ClaimID            string    `json:"claim_id"`
+	DocumentID         string    `json:"document_id"`
+	PassageID          *int64    `json:"passage_id,omitempty"`
+	ClusterID          *string   `json:"cluster_id,omitempty"`
+	Stance             string    `json:"stance"` // supports, refutes, mentions
+	Excerpt            string    `json:"excerpt"`
+	Page               *int      `json:"page,omitempty"`
+	Confidence         float32   `json:"confidence"`
+	IsOfficialDoc      bool      `json:"is_official_doc"`
+	Notes              string    `json:"notes,omitempty"`
+	VendorMatch        bool      `json:"vendor_match"`
+	ModelMatch         bool      `json:"model_match"`
+	FirmwareMatch      bool      `json:"firmware_match"`
+	FeatureMatch       bool      `json:"feature_match"`
+	ModeMatch          bool      `json:"mode_match"`
+	PrerequisitesMatch bool      `json:"prerequisites_match"`
+	SourceSpan         string    `json:"source_span,omitempty"`
+	ValidationRunID    *string   `json:"validation_run_id,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type Contradiction struct {

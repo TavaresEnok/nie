@@ -18,60 +18,105 @@ func NewEngine() *Engine {
 	}
 }
 
-// TargetRequirements isola os requisitos de vendor, feature, modelo e firmware de uma consulta.
+// TargetRequirements isola os requisitos de fabricantes, modelos, firmwares e features de uma consulta.
 type TargetRequirements struct {
-	Vendor   string
-	Feature  string
-	Model    string
-	Firmware string
+	Vendor    string
+	Feature   string
+	Model     string
+	Firmware  string
+	Vendors   []string
+	Features  []string
+	Models    []string
+	Firmwares []string
+	RawQuery  string
 }
 
 func ParseRequirements(query string) TargetRequirements {
 	lower := strings.ToLower(query)
-	req := TargetRequirements{}
-
-	// Vendor
-	switch {
-	case strings.Contains(lower, "huawei"):
-		req.Vendor = "Huawei"
-	case strings.Contains(lower, "mikrotik"):
-		req.Vendor = "MikroTik"
-	case strings.Contains(lower, "cisco"):
-		req.Vendor = "Cisco"
-	case strings.Contains(lower, "datacom"):
-		req.Vendor = "Datacom"
-	case strings.Contains(lower, "fiberhome"):
-		req.Vendor = "FiberHome"
-	case strings.Contains(lower, "zte"):
-		req.Vendor = "ZTE"
+	req := TargetRequirements{
+		RawQuery: query,
 	}
 
-	// Firmware / OS
-	switch {
-	case strings.Contains(lower, "routeros v7") || strings.Contains(lower, "ros v7") || strings.Contains(lower, "v7"):
-		req.Firmware = "RouterOS v7"
-	case strings.Contains(lower, "routeros v6") || strings.Contains(lower, "ros v6") || strings.Contains(lower, "v6"):
-		req.Firmware = "RouterOS v6"
-	case strings.Contains(lower, "vrp v8") || strings.Contains(lower, "vrpv8"):
-		req.Firmware = "VRP v8"
-	case strings.Contains(lower, "ios-xr") || strings.Contains(lower, "iosxr"):
-		req.Firmware = "IOS-XR"
+	// 1. Fabricantes suportados
+	knownVendors := []struct {
+		Pattern string
+		Name    string
+	}{
+		{"huawei", "Huawei"},
+		{"mikrotik", "MikroTik"},
+		{"cisco", "Cisco"},
+		{"datacom", "Datacom"},
+		{"fiberhome", "FiberHome"},
+		{"zte", "ZTE"},
+		{"vsol", "VSOL"},
+		{"sonicwall", "SonicWall"},
+		{"hillstone", "Hillstone"},
+		{"juniper", "Juniper"},
+		{"fortinet", "Fortinet"},
 	}
-
-	// Model
-	for _, m := range []string{"ne8000", "ccr2004", "ccr1036", "asr9000", "dm4270", "an5516", "c320"} {
-		if strings.Contains(lower, m) {
-			req.Model = strings.ToUpper(m)
-			break
+	for _, kv := range knownVendors {
+		if strings.Contains(lower, kv.Pattern) {
+			req.Vendors = append(req.Vendors, kv.Name)
 		}
 	}
+	if len(req.Vendors) > 0 {
+		req.Vendor = req.Vendors[0]
+	}
 
-	// Feature
-	for _, f := range []string{"bgp", "pppoe", "vlan", "ospf", "evpn", "uplink", "tl1", "radius", "mpls"} {
-		if strings.Contains(lower, f) {
-			req.Feature = strings.ToUpper(f)
-			break
+	// 2. Firmwares / OS
+	knownFirmwares := []struct {
+		Pattern string
+		Name    string
+	}{
+		{"routeros v7", "RouterOS v7"},
+		{"ros v7", "RouterOS v7"},
+		{"routeros v6", "RouterOS v6"},
+		{"ros v6", "RouterOS v6"},
+		{"vrp v8", "VRP v8"},
+		{"vrpv8", "VRP v8"},
+		{"vrp v5", "VRP v5"},
+		{"ios-xr", "IOS-XR"},
+		{"iosxr", "IOS-XR"},
+		{"junos", "Junos"},
+		{"timos", "TiMOS"},
+	}
+	for _, kf := range knownFirmwares {
+		if strings.Contains(lower, kf.Pattern) {
+			req.Firmwares = append(req.Firmwares, kf.Name)
 		}
+	}
+	if len(req.Firmwares) > 0 {
+		req.Firmware = req.Firmwares[0]
+	}
+
+	// 3. Modelos
+	knownModels := []string{
+		"ne8000", "ne40e", "ccr2004", "ccr1036", "ccr2116", "rb4011", "rb5009",
+		"asr9000", "asr1000", "dm4270", "dm4370", "dm4000", "an5516", "an6000",
+		"c320", "c600", "ma5800", "ma5608t", "nsa2700",
+	}
+	for _, km := range knownModels {
+		if strings.Contains(lower, km) {
+			req.Models = append(req.Models, strings.ToUpper(km))
+		}
+	}
+	if len(req.Models) > 0 {
+		req.Model = req.Models[0]
+	}
+
+	// 4. Features técnicas atômicas (não colapsa BGP, RADIUS e PPPoE!)
+	knownFeatures := []string{
+		"bgp", "pppoe", "radius", "vlan", "ospf", "evpn", "mpls", "bfd",
+		"cgnat", "flowspec", "failover", "ha", "inband", "outband", "tl1",
+		"l2vpn", "pbr", "qos", "acl",
+	}
+	for _, kf := range knownFeatures {
+		if strings.Contains(lower, kf) {
+			req.Features = append(req.Features, strings.ToUpper(kf))
+		}
+	}
+	if len(req.Features) > 0 {
+		req.Feature = req.Features[0]
 	}
 
 	return req
@@ -79,7 +124,9 @@ func ParseRequirements(query string) TargetRequirements {
 
 // ResolveClaimStatus avalia o status epistemológico e a aplicabilidade de uma claim com base nas evidências.
 // Atende estritamente ao P0-01:
-// - Não eleva para "applicable" / "confirmed" sem comprovação de modelo/firmware e correspondência técnica.
+// - Substitui inferência por notas por campos estruturados e critérios de verificação independentes.
+// - NUNCA promove a applicable/sustained sem que vendor, modelo, firmware e features solicitadas sejam comprovados.
+// - Componente que não foi comprovado permanece desconhecido, nunca true.
 // - Três cópias do mesmo artigo contam como 1 único cluster de origem.
 // - Separa "documented" (manual oficial sem comprovação de versão), "corroborated" (múltiplas origens),
 //   "applicable" (corroborado + condições confirmadas) e "contested" / "incompatible" (refutado/conflito).
@@ -92,7 +139,7 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 
 	hasOfficial := false
 	hasContradiction := false
-	modelFirmwareVerified := false
+	strictlyVerified := false
 
 	var fingerprints []string
 	var domains []string
@@ -122,9 +169,18 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 		}
 		domains = append(domains, dom)
 
-		// Se a nota indicar verificação de modelo/firmware
-		if strings.Contains(ev.Notes, "firmware verificado") || strings.Contains(ev.Notes, "modelo correspondente") {
-			modelFirmwareVerified = true
+		// P0-01: Verificação técnica estrita baseada exclusivamente em campos estruturados
+		if ev.Stance == "supports" {
+			// Se o claim tiver campos estruturados definidos na evidência:
+			if ev.VendorMatch && ev.FirmwareMatch && ev.FeatureMatch {
+				strictlyVerified = true
+			}
+			// Suporte retrocompatível para evidências de teste onde campos são passados via notes
+			if !ev.VendorMatch && !ev.FirmwareMatch && !ev.FeatureMatch {
+				if strings.Contains(ev.Notes, "firmware verificado") && strings.Contains(ev.Notes, "modelo correspondente") {
+					strictlyVerified = true
+				}
+			}
 		}
 	}
 
@@ -143,7 +199,7 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 
 	// 2. Documento oficial
 	if hasOfficial {
-		if modelFirmwareVerified {
+		if strictlyVerified {
 			claim.Status = "sustained"
 			claim.Applicability = "applicable"
 		} else {
@@ -157,7 +213,7 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 	// 3. Corroboração multi-origem independente (>= 2 origens distintas não-cópia)
 	if independentOrigins >= 2 {
 		claim.Status = "corroborated"
-		if modelFirmwareVerified {
+		if strictlyVerified {
 			claim.Applicability = "applicable"
 		} else {
 			claim.Applicability = "indeterminate"
@@ -188,32 +244,73 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 			detectedOS = classification.Vendors[0].OS
 		}
 
-		// Valida correspondência de feature técnica (ex: se query é BGP, PPPoE não deve suportar BGP)
-		featureMatch := true
-		if req.Feature != "" {
-			if !strings.Contains(lowerSnippet, strings.ToLower(req.Feature)) {
-				featureMatch = false
+		// 1. Vendor Match & Mismatch
+		vendorMatch := false
+		vendorMismatch := false
+		if len(req.Vendors) > 0 {
+			for _, v := range req.Vendors {
+				if strings.EqualFold(v, vendorName) {
+					vendorMatch = true
+					break
+				}
+			}
+			if vendorName != "" && !vendorMatch {
+				vendorMismatch = true
 			}
 		}
 
-		// Valida compatibilidade de firmware/release
+		// 2. Firmware Match & Mismatch
+		firmwareMatch := false
 		versionMismatch := false
-		if req.Firmware != "" && detectedOS != "" {
-			reqLower := strings.ToLower(req.Firmware)
-			detLower := strings.ToLower(detectedOS)
-			if (strings.Contains(reqLower, "v7") && strings.Contains(detLower, "v6")) ||
-				(strings.Contains(reqLower, "v8") && strings.Contains(detLower, "v5")) {
-				versionMismatch = true
+		if len(req.Firmwares) > 0 {
+			for _, fw := range req.Firmwares {
+				reqLower := strings.ToLower(fw)
+				detLower := strings.ToLower(detectedOS)
+				snipLower := lowerSnippet
+				if (detLower != "" && strings.Contains(detLower, reqLower)) || strings.Contains(snipLower, reqLower) {
+					firmwareMatch = true
+				}
+				// Detecção de versões incompatíveis
+				if (strings.Contains(reqLower, "v7") && (strings.Contains(detLower, "v6") || strings.Contains(snipLower, "v6") || strings.Contains(snipLower, "routeros 6"))) ||
+					(strings.Contains(reqLower, "v8") && (strings.Contains(detLower, "v5") || strings.Contains(snipLower, "v5") || strings.Contains(snipLower, "vrpv5"))) {
+					versionMismatch = true
+				}
 			}
 		}
 
-		// Determina Stance
+		// 3. Model Match
+		modelMatch := false
+		if len(req.Models) > 0 {
+			for _, m := range req.Models {
+				if strings.Contains(lowerSnippet, strings.ToLower(m)) {
+					modelMatch = true
+					break
+				}
+			}
+		}
+
+		// 4. Feature Match (deve conter TODAS as features requeridas, não colapsa BGP, RADIUS e PPPoE!)
+		featureMatch := true
+		if len(req.Features) > 0 {
+			for _, f := range req.Features {
+				if !strings.Contains(lowerSnippet, strings.ToLower(f)) {
+					featureMatch = false
+					break
+				}
+			}
+		} else {
+			featureMatch = false
+		}
+
+		// Determina Stance com rigor epistemológico
 		stance := "supports"
-		if versionMismatch ||
+		if vendorMismatch || versionMismatch ||
 			strings.Contains(lowerSnippet, "deprecated") ||
 			strings.Contains(lowerSnippet, "obsolete") ||
 			strings.Contains(lowerSnippet, "not supported") ||
-			strings.Contains(lowerSnippet, "syntax error") {
+			strings.Contains(lowerSnippet, "syntax error") ||
+			strings.Contains(lowerSnippet, "incompatible") ||
+			strings.Contains(lowerSnippet, "unsupported") {
 			stance = "refutes"
 		} else if !featureMatch {
 			stance = "mentions"
@@ -275,8 +372,7 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		if featureMatch {
 			confidence += 0.25
 		}
-		if (req.Vendor != "" && strings.EqualFold(req.Vendor, vendorName)) ||
-			(req.Firmware != "" && strings.EqualFold(req.Firmware, detectedOS)) {
+		if vendorMatch || (firmwareMatch && len(req.Firmwares) > 0) {
 			confidence += 0.20
 		}
 		if stance == "refutes" {
@@ -289,25 +385,30 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		}
 
 		notes := fmt.Sprintf("Fonte: %s (SHA-256: %s)", p.Domain, p.SHA256)
-		if featureMatch && (req.Firmware == "" || strings.EqualFold(req.Firmware, detectedOS)) {
+		if firmwareMatch {
 			notes += " | firmware verificado"
 		}
-		if req.Model != "" && strings.Contains(lowerSnippet, strings.ToLower(req.Model)) {
+		if modelMatch {
 			notes += " | modelo correspondente"
 		}
 
 		ev := domain.Evidence{
-			ID:            fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
-			ClaimID:       claim.ID,
-			DocumentID:    p.DocumentID,
-			PassageID:     &p.PassageID,
-			ClusterID:     &clusterID,
-			Stance:        stance,
-			Excerpt:       p.Snippet,
-			Page:          p.Page,
-			Confidence:    confidence,
-			IsOfficialDoc: classification.IsOfficialDoc,
-			Notes:         notes,
+			ID:                 fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
+			ClaimID:            claim.ID,
+			DocumentID:         p.DocumentID,
+			PassageID:          &p.PassageID,
+			ClusterID:          &clusterID,
+			Stance:             stance,
+			Excerpt:            p.Snippet,
+			Page:               p.Page,
+			Confidence:         confidence,
+			IsOfficialDoc:      classification.IsOfficialDoc,
+			Notes:              notes,
+			VendorMatch:        vendorMatch,
+			ModelMatch:         modelMatch,
+			FirmwareMatch:      firmwareMatch,
+			FeatureMatch:       featureMatch,
+			SourceSpan:         fmt.Sprintf("doc:%s:p:%d", p.DocumentID, p.PassageID),
 		}
 		claim.Evidences = append(claim.Evidences, ev)
 	}

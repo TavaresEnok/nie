@@ -39,9 +39,10 @@ func TestLoadEmbedded(t *testing.T) {
 	}
 }
 
-// TestBenchmark_All20TelecomScenariosExecution executa e valida os 20 cenários reais de telecom
-// verificando que cada um possui sintaxe, comandos esperados, fabricante, modelo e armadilhas documentadas.
-func TestBenchmark_All20TelecomScenariosExecution(t *testing.T) {
+// TestEvaluatorSyntheticFixtures (P0-04) valida o cálculo matemático do avaliador com fixtures sintéticas.
+// Este teste NÃO representa nem deve ser anunciado como pesquisa em produção ou crawling real na internet;
+// ele verifica exclusivamente que a função EvaluatePassage calcula o score correto quando comandos esperados estão presentes.
+func TestEvaluatorSyntheticFixtures(t *testing.T) {
 	ds, err := LoadEmbedded()
 	if err != nil {
 		t.Fatalf("falha ao carregar dataset de 20 perguntas: %v", err)
@@ -51,17 +52,7 @@ func TestBenchmark_All20TelecomScenariosExecution(t *testing.T) {
 		t.Fatalf("esperava 20 perguntas no dataset, encontrou %d", len(ds.Questions))
 	}
 
-	type ScenarioResult struct {
-		ID       string
-		Vendor   string
-		Topic    string
-		CmdCount int
-		Score    float64
-	}
-
-	var results []ScenarioResult
 	for _, q := range ds.Questions {
-		// Monta fixture sintética representativa com comandos esperados
 		var syntheticText strings.Builder
 		syntheticText.WriteString(q.Title + "\n")
 		for _, cmd := range q.ExpectedCommands {
@@ -70,21 +61,33 @@ func TestBenchmark_All20TelecomScenariosExecution(t *testing.T) {
 
 		score := ds.EvaluatePassage(q, syntheticText.String())
 		if score < 1.0 {
-			t.Errorf("cenário %s (%s) obteve recall imperfeito: %.2f", q.ID, q.Title, score)
+			t.Errorf("fixture sintética para %s (%s) falhou no avaliador: %.2f", q.ID, q.Title, score)
 		}
-
-		results = append(results, ScenarioResult{
-			ID:       q.ID,
-			Vendor:   strings.Join(q.Vendors, "/"),
-			Topic:    q.Topic,
-			CmdCount: len(q.ExpectedCommands),
-			Score:    score,
-		})
 	}
-
-	t.Logf("Bateria de 20 Casos Reais Telecom executada com sucesso:")
-	for _, r := range results {
-		t.Logf("  [%s] %-12s | %-24s | Comandos: %d | Recall: %.0f%%", r.ID, r.Vendor, r.Topic, r.CmdCount, r.Score*100)
-	}
+	t.Logf("Verificação matemática do avaliador em 20 fixtures sintéticas de referência concluída (não representa pesquisa real)")
 }
 
+// TestBenchmark_EvaluatorRejectsNegativeAndContradictoryPassages (P0-04) valida que passagens
+// irrelevantes ou de outros fabricantes retornam pontuação zero ou nula, evitando falsos positivos.
+func TestBenchmark_EvaluatorRejectsNegativeAndContradictoryPassages(t *testing.T) {
+	ds, err := LoadEmbedded()
+	if err != nil {
+		t.Fatalf("falha ao carregar dataset: %v", err)
+	}
+
+	// Teste com pergunta TEL-001 (Huawei BGP/BNG)
+	q1 := ds.Questions[0]
+
+	// Passagem de fabricante completamente divergente (MikroTik)
+	divergentPassage := "/interface ethernet set [ find default-name=ether1 ] name=uplink"
+	scoreDivergent := ds.EvaluatePassage(q1, divergentPassage)
+	if scoreDivergent > 0.0 {
+		t.Errorf("Passagem de fabricante totalmente divergente recebeu score positivo indevido: %.2f", scoreDivergent)
+	}
+
+	// Passagem vazia ou sem comandos técnicos
+	emptyScore := ds.EvaluatePassage(q1, "Texto puramente genérico sobre computação em nuvem sem comandos CLI.")
+	if emptyScore > 0.0 {
+		t.Errorf("Passagem genérica recebeu score positivo indevido: %.2f", emptyScore)
+	}
+}

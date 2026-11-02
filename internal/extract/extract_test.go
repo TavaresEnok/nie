@@ -122,3 +122,17 @@ func minimalPDF(text string) []byte {
 	fmt.Fprintf(&buf, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xref)
 	return buf.Bytes()
 }
+
+func TestExtractURLLinks(t *testing.T) {
+	text := "Consulte o manual oficial em https://support.huawei.com/enterprise/doc e https://wiki.mikrotik.com/wiki/BGP."
+	links := ExtractURLLinks(text)
+	if len(links) != 2 {
+		t.Fatalf("Esperava 2 links extraídos, obteve %d: %v", len(links), links)
+	}
+	if links[0] != "https://support.huawei.com/enterprise/doc" {
+		t.Errorf("Link 1 incorreto: %s", links[0])
+	}
+	if links[1] != "https://wiki.mikrotik.com/wiki/BGP" {
+		t.Errorf("Link 2 incorreto: %s", links[1])
+	}
+}

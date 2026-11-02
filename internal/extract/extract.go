@@ -105,6 +105,26 @@ func HTML(base *url.URL, contentType string, body []byte) (Result, error) {
 	return res, nil
 }
 
+var urlRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-\._~:/\?#\[\]@!$&'\(\)\*\+,;=%]+[a-zA-Z0-9/_]`)
+
+// ExtractURLLinks extrai URLs e citações de hiperlinks presentes no texto puro de PDFs ou documentos técnicos.
+func ExtractURLLinks(text string) []string {
+	matches := urlRegex.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var unique []string
+	for _, m := range matches {
+		cleaned := strings.TrimRight(m, ".,;:!?)'\"")
+		if _, exists := seen[cleaned]; !exists && len(cleaned) > 8 {
+			seen[cleaned] = struct{}{}
+			unique = append(unique, cleaned)
+		}
+	}
+	return unique
+}
+
 func Text(body []byte) (Result, error) {
 	text := NormalizeText(string(body))
 	if len(text) > MaxTextChars {
@@ -115,6 +135,7 @@ func Text(body []byte) (Result, error) {
 		res.Title = first
 	}
 	res.Passages = MakePassages(text, nil, DefaultPassageChars)
+	res.Links = ExtractURLLinks(text)
 	return res, nil
 }
 
@@ -157,6 +178,7 @@ func PDF(body []byte) (res Result, err error) {
 		return Result{}, fmt.Errorf("PDF sem texto extraível (OCR não habilitado)")
 	}
 	res.Title = firstLine(res.Text)
+	res.Links = ExtractURLLinks(res.Text)
 	return res, nil
 }
 

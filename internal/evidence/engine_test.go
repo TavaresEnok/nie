@@ -51,7 +51,7 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 	eng := NewEngine()
 
 	// Adversarial Case 1: Manual legítimo sem validação de modelo/firmware específico
-	// Deve receber status "documented" e aplicabilidade "indeterminate", NUNCA "confirmed" (P0-01)
+	// Deve receber status "documented" e aplicabilidade "indeterminate", NUNCA "confirmed" ou "applicable" (P0-01)
 	c1 := &domain.Claim{Title: "BGP Test"}
 	eng.ResolveClaimStatus(c1, []domain.Evidence{
 		{ID: "e1", Stance: "supports", IsOfficialDoc: true, Notes: "Fonte: huawei.com"},
@@ -63,10 +63,19 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 		t.Errorf("Manual oficial sem comprovação de firmware não deve ter applicability confirmed, obteve %s", c1.Applicability)
 	}
 
-	// Case 2: Manual legítimo com modelo e firmware explicitamente verificados
+	// Case 2: Manual legítimo com modelo, firmware e feature comprovados via campos estruturados
 	c2 := &domain.Claim{Title: "BGP Test 2"}
 	eng.ResolveClaimStatus(c2, []domain.Evidence{
-		{ID: "e1", Stance: "supports", IsOfficialDoc: true, Notes: "Fonte: huawei.com | firmware verificado | modelo correspondente"},
+		{
+			ID:            "e1",
+			Stance:        "supports",
+			IsOfficialDoc: true,
+			VendorMatch:   true,
+			FirmwareMatch: true,
+			FeatureMatch:  true,
+			ModelMatch:    true,
+			Notes:         "Fonte: huawei.com",
+		},
 	})
 	if c2.Status != "sustained" || c2.Applicability != "applicable" {
 		t.Errorf("Manual oficial com firmware verificado deve ser sustained/applicable, obteve %s/%s", c2.Status, c2.Applicability)
@@ -81,17 +90,33 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 		{ID: "e2", Stance: "supports", ClusterID: &clusterSame, Notes: "Fonte: blog2.com"},
 		{ID: "e3", Stance: "supports", ClusterID: &clusterSame, Notes: "Fonte: blog3.com"},
 	})
-	if c3.Status != "unconfirmed" {
-		t.Errorf("3 cópias do mesmo artigo não devem ser corroboradas, obteve status: %s", c3.Status)
+	if c3.Status != "unconfirmed" || c3.Applicability != "indeterminate" {
+		t.Errorf("3 cópias do mesmo artigo não devem ser corroboradas, obteve status/applicability: %s/%s", c3.Status, c3.Applicability)
 	}
 
-	// Case 4: Duas origens genuinamente independentes com firmware verificado
+	// Case 4: Duas origens genuinamente independentes com verificação estruturada
 	c4 := &domain.Claim{Title: "BGP Test 4"}
 	clusterA := "cluster-a"
 	clusterB := "cluster-b"
 	eng.ResolveClaimStatus(c4, []domain.Evidence{
-		{ID: "e1", Stance: "supports", ClusterID: &clusterA, Notes: "Fonte: netops.org | firmware verificado"},
-		{ID: "e2", Stance: "supports", ClusterID: &clusterB, Notes: "Fonte: bbr.org | firmware verificado"},
+		{
+			ID:            "e1",
+			Stance:        "supports",
+			ClusterID:     &clusterA,
+			VendorMatch:   true,
+			FirmwareMatch: true,
+			FeatureMatch:  true,
+			Notes:         "Fonte: netops.org",
+		},
+		{
+			ID:            "e2",
+			Stance:        "supports",
+			ClusterID:     &clusterB,
+			VendorMatch:   true,
+			FirmwareMatch: true,
+			FeatureMatch:  true,
+			Notes:         "Fonte: bbr.org",
+		},
 	})
 	if c4.Status != "corroborated" || c4.Applicability != "applicable" {
 		t.Errorf("Duas origens independentes com firmware verificado devem ser corroborated/applicable, obteve %s/%s", c4.Status, c4.Applicability)
@@ -105,6 +130,98 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 	})
 	if c5.Status != "contested" || c5.Applicability != "incompatible" {
 		t.Errorf("Contradição deve resultar em contested/incompatible, obteve %s/%s", c5.Status, c5.Applicability)
+	}
+}
+
+// TestP001_DivergentVendorNeverApplicable valida que divergência de fabricante resulta em refutação e incompatibilidade
+func TestP001_DivergentVendorNeverApplicable(t *testing.T) {
+	eng := NewEngine()
+	query := "Cisco ASR9000 BGP peering"
+
+	passages := []domain.SearchResult{
+		{
+			PassageID:  1,
+			DocumentID: "doc-huawei",
+			Domain:     "support.huawei.com",
+			Snippet:    "bgp 65000\n peer 10.1.1.1 as-number 65001",
+			SHA256:     "sha-hw",
+		},
+	}
+
+	claims := eng.BuildClaimsFromPassages("camp-divergent", query, passages)
+	if len(claims) == 0 {
+		t.Fatalf("esperava ao menos 1 claim sintetizada")
+	}
+
+	for _, c := range claims {
+		if c.Applicability == "applicable" || c.Status == "sustained" {
+			t.Errorf("Passagem de fabricante divergente (Huawei para consulta Cisco) gerou applicable/sustained indevidamente: %+v", c)
+		}
+		if c.Applicability != "incompatible" && c.Applicability != "indeterminate" {
+			t.Errorf("Esperava indeterminate ou incompatible para fabricante divergente, obteve %s", c.Applicability)
+		}
+	}
+}
+
+// TestP001_MissingFirmwareVersionNeverPromotedToApplicable valida que ausência de versão solicitada impede promoção
+func TestP001_MissingFirmwareVersionNeverPromotedToApplicable(t *testing.T) {
+	eng := NewEngine()
+	// Consulta sem especificação de versão ou firmware
+	query := "Huawei NE8000 BGP configuration"
+
+	passages := []domain.SearchResult{
+		{
+			PassageID:  1,
+			DocumentID: "doc-official",
+			Domain:     "support.huawei.com",
+			Snippet:    "NE8000 bgp 65000 peer 1.1.1.1 as-number 65001",
+			SHA256:     "sha-official",
+		},
+	}
+
+	claims := eng.BuildClaimsFromPassages("camp-no-firmware", query, passages)
+	for _, c := range claims {
+		if c.Applicability == "applicable" {
+			t.Errorf("Documento sem firmware especificado/verificado não pode ser applicable: %+v", c)
+		}
+		if c.Status != "documented" {
+			t.Errorf("Status deveria ser documented para manual oficial sem versão verificada, obteve %s", c.Status)
+		}
+	}
+}
+
+// TestP001_CompoundRequirementsNotCollapsed valida que múltiplas features (BGP + RADIUS + PPPoE) não são colapsadas
+func TestP001_CompoundRequirementsNotCollapsed(t *testing.T) {
+	eng := NewEngine()
+	query := "MikroTik RouterOS v7 BGP RADIUS PPPoE failover"
+
+	req := ParseRequirements(query)
+	if len(req.Features) < 3 {
+		t.Fatalf("Esperava que features BGP, RADIUS e PPPoE fossem detectadas individualmente, obteve: %v", req.Features)
+	}
+
+	// Passagem apenas fala de BGP, não comprova RADIUS nem continuidade de PPPoE
+	passages := []domain.SearchResult{
+		{
+			PassageID:  1,
+			DocumentID: "doc-bgp-only",
+			Domain:     "help.mikrotik.com",
+			Snippet:    "RouterOS v7 /routing bgp connection add name=peer1 as=65000",
+			SHA256:     "sha-bgp",
+		},
+	}
+
+	claims := eng.BuildClaimsFromPassages("camp-compound", query, passages)
+	for _, c := range claims {
+		if c.Applicability == "applicable" {
+			t.Errorf("Passagem parcial (apenas BGP) para consulta composta (BGP+RADIUS+PPPoE) não pode ser applicable: %+v", c)
+		}
+		// A evidência gerada deve registrar feature_match = false
+		for _, ev := range c.Evidences {
+			if ev.FeatureMatch {
+				t.Errorf("Evidência incompleta não deveria ter feature_match = true para consulta com múltiplos requisitos: %+v", ev)
+			}
+		}
 	}
 }
 
@@ -140,7 +257,7 @@ func TestBuildClaimsFeatureAndFirmwareMismatch(t *testing.T) {
 
 	for _, c := range claims {
 		// Nenhuma claim deve ser marcada como confirmed ou applicable sem prova
-		if c.Applicability == "confirmed" {
+		if c.Applicability == "confirmed" || c.Applicability == "applicable" {
 			t.Errorf("Claim não pode ser confirmada com evidências de feature errada ou firmware incompatível: %+v", c)
 		}
 	}

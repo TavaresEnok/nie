@@ -187,6 +187,7 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 		StatusCode     int      `json:"status_code"`
 		ContentType    string   `json:"content_type"`
 		Text           string   `json:"text"`
+		RawHTML        string   `json:"raw_html"`
 		ExtractedLinks []string `json:"extracted_links"`
 	}
 
@@ -196,12 +197,17 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 
 	mentions := extract.ExtractMentions(res.Text, 25)
 
+	rawBytes := []byte(res.RawHTML)
+	if len(rawBytes) == 0 {
+		rawBytes = []byte(res.Text)
+	}
+
 	return &domain.FetchResult{
 		TaskID:            task.ID,
 		EffectiveURL:      res.EffectiveURL,
 		StatusCode:        res.StatusCode,
 		ContentType:       res.ContentType,
-		RawContent:        []byte(res.Text),
+		RawContent:        rawBytes,
 		Text:              res.Text,
 		ExtractedLinks:    res.ExtractedLinks,
 		ExtractedMentions: mentions,
@@ -281,7 +287,11 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		StatusCode     int      `json:"status_code"`
 		ContentType    string   `json:"content_type"`
 		Markdown       string   `json:"markdown"`
+		RawHTML        string   `json:"raw_html"`
 		ExtractedLinks []string `json:"extracted_links"`
+		BrowserSuccess bool     `json:"browser_success"`
+		BrowserError   string   `json:"browser_error"`
+		FallbackReason string   `json:"fallback_reason"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
@@ -290,19 +300,27 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 
 	mentions := extract.ExtractMentions(res.Markdown, 25)
 
+	rawBytes := []byte(res.RawHTML)
+	if len(rawBytes) == 0 {
+		rawBytes = []byte(res.Markdown)
+	}
+
 	return &domain.FetchResult{
 		TaskID:            task.ID,
 		EffectiveURL:      res.EffectiveURL,
 		StatusCode:        res.StatusCode,
 		ContentType:       res.ContentType,
-		RawContent:        []byte(res.Markdown),
+		RawContent:        rawBytes,
 		Text:              res.Markdown,
 		ExtractedLinks:    res.ExtractedLinks,
 		ExtractedMentions: mentions,
 		Duration:          duration,
 		Metadata: map[string]any{
-			"executor": "crawl4ai",
-			"format":   "markdown",
+			"executor":        "crawl4ai",
+			"format":          "markdown",
+			"browser_success": res.BrowserSuccess,
+			"browser_error":   res.BrowserError,
+			"fallback_reason": res.FallbackReason,
 		},
 	}, nil
 }
@@ -338,19 +356,28 @@ func (r *Router) SelectExecutor(task domain.FetchTask) Executor {
 		}
 	}
 
+	lowerURL := strings.ToLower(task.URL)
+
 	// 2. Modo browser ou renderização JS necessária -> Crawl4AI
-	if task.Mode == "browser" {
+	if task.Mode == "browser" || strings.Contains(lowerURL, "/#/") || strings.Contains(lowerURL, "/app/") || strings.Contains(lowerURL, "/portal/") || strings.Contains(lowerURL, "/dashboard/") {
 		if exec, ok := r.executors["crawl4ai"]; ok {
 			return exec
 		}
 	}
 
-	// 3. Destinos estáticos ou padrão -> Native
+	// 3. Catálogos estruturados ou documentação densa -> Scrapy
+	if strings.Contains(lowerURL, "/docs/") || strings.Contains(lowerURL, "/manual/") || strings.Contains(lowerURL, "/wiki/") || strings.Contains(lowerURL, "/reference/") || strings.Contains(lowerURL, "/catalog/") {
+		if exec, ok := r.executors["scrapy"]; ok {
+			return exec
+		}
+	}
+
+	// 4. Destinos estáticos ou padrão -> Native
 	if exec, ok := r.executors["native"]; ok {
 		return exec
 	}
 
-	// 4. Qualquer executor registrado
+	// 5. Qualquer executor registrado
 	for _, exec := range r.executors {
 		return exec
 	}

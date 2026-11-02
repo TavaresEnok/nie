@@ -7,44 +7,44 @@ CLI, configurações, RFCs, datasheets, READMEs e notas de versão.
 Cada resultado de busca aponta para o documento original, o trecho exato, a
 página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 
-> **Status de Auditoria e Conformidade:**
-> O NIE adota transparência estrita entre o que está implementado, o que foi testado em laboratório e o que está planejado para fases futuras.
+> **Status de Auditoria e Conformidade Técnica:**
+> O NIE adota transparência estrita entre o que está implementado, o que foi testado com baterias unitárias/integradas e o que permanece em desenvolvimento para fases futuras.
+> Revisado estaticamente e testado após a Segunda Auditoria Técnica Independente (Nov/2026).
 
 ## Matriz de Conformidade e Status dos Requisitos
 
 | Requisito / Componente | Escopo | Status Real | Evidência / Testes |
 |---|---|---|---|
-| **Go 1.24+ / Huma / pgxpool** | Framework API & HTTP | **Implementado** | `cmd/nie/main.go`, `internal/api/api.go` |
-| **PostgreSQL 18 + SKIP LOCKED** | Fila e Storage | **Implementado & Testado** | `internal/store/store.go`, `store_integration_test.go` |
-| **Proteção Anti-SSRF & Netguard** | Egress Efetivo (P0-03) | **Implementado & Testado** | `internal/netguard/ip.go`, `internal/crawler/router.go`, workers Python |
-| **Validação Canônica de Domínio Oficial** | Anti-Spoofing (P0-02) | **Implementado & Testado** | `internal/classifier/classifier.go`, `classifier_test.go` |
-| **Motor de Evidências Epistemológico** | Rigor Técnico (P0-01) | **Implementado & Testado** | `internal/evidence/engine.go`, `engine_test.go` (sem rótulos infundados de 'verificado') |
-| **Origin Clustering Anti-Cópia** | Thread-Safe (P1-06) | **Implementado & Testado** | `internal/evidence/clustering.go` (`sync.RWMutex`, N réplicas = 1 cluster) |
-| **Preservação de Todas as Arestas** | Grafo Multi-Origens (P1-03) | **Implementado & Testado** | `internal/store/store.go`, `TestP103_MultipleOriginsPreserveEdges` |
-| **Advisory Lock por Conexão Dedicada** | Migração Segura (P1-02) | **Implementado & Testado** | `internal/store/migrate.go`, `TestP102_ConcurrentMigrations` |
-| **Fronteira com Focused Crawling Dinâmico** | Priorização por Score (P1-04) | **Implementado & Testado** | `internal/worker/worker.go` (`computeFrontierPriority`) |
-| **Grafo Visual Interativo com Multi-Origens** | UI de Descoberta (P1-04) | **Implementado** | `web/src/App.svelte` (visualização de ligações `A->C`, `B->C` e convergência) |
-| **Agendamento com Fase de Descoberta** | Scheduler Autônomo (P1-01) | **Implementado** | `internal/scheduler/scheduler.go` (dispara adaptadores mesmo sem seeds) |
-| **Configuração SearXNG JSON** | API SearXNG (P0-04) | **Implementado** | `config/searxng/settings.yml`, `docker-compose.yml` |
-| **Git Eye / Descoberta Local e Remota** | Código Técnico (P1-05) | **Implementado & Testado** | `internal/discovery/git_local.go`, `git_local_test.go` (.cfg, .rsc rastreados) |
-| **Workers Scrapy e Crawl4AI com Egress Guard** | Bridges Isoladas (P0-03) | **Implementado & Protegido**| `workers/scrapy_worker/app.py`, `workers/crawl4ai_worker/app.py` |
-| **Docling / Tika / OCR Avançado** | Extração Especializada | **Parcial / Planejado** | Extração nativa Go de PDF/HTML ativa; OCR sob demanda planejado para worker dedicado |
+| **Motor de Evidências Epistemológico** | Validação Técnica Estrita (P0-01) | **Implementado & Testado** | `internal/evidence/engine.go`, `engine_test.go` (critérios booleanos estruturados: `vendor_match`, `model_match`, `firmware_match`, `feature_match`; ausência de firmware gera `indeterminate`, nunca `applicable`) |
+| **Worker Browser / Playwright** | Execução e Renderização JS (P0-02) | **Implementado & Protegido** | `workers/crawl4ai_worker/app.py` (correção do caminho de sucesso, renderização DOM via Playwright e fallback transparente para requests com preservação de `raw_html`) |
+| **Proteção Anti-SSRF e Egress no Browser** | Firewall de Subrecursos (P0-03) | **Implementado & Testado** | `workers/crawl4ai_worker/app.py` (`page.route('**/*')` bloqueia subrecursos, XHR, redirects e metadados cloud 169.254/RFC1918), `workers/test_workers_ssrf.py` |
+| **Avaliador de Benchmarks** | Fixtures Sintéticas vs E2E (P0-04) | **Implementado & Testado** | `internal/benchmark/benchmark_test.go` (`TestEvaluatorSyntheticFixtures` valida cálculo do avaliador sem inflar métricas de busca na internet; testes negativos rejeitam fabricantes divergentes) |
+| **Roteamento Dinâmico Multi-Executor** | Seleção Automática (P1-01) | **Implementado & Testado** | `internal/crawler/router.go` (`SelectExecutor` seleciona Crawl4AI para SPAs/JS, Scrapy para catálogos/manuais estruturados e Native para tráfego padrão) |
+| **Integridade de Conteúdo Original** | Preservação de Bytes CAS (P1-04) | **Implementado & Testado** | `internal/crawler/router.go`, workers Python (retorno de `raw_html` original para cálculo de SHA-256 no CAS, separando-o do texto e markdown derivados) |
+| **Priorização e Descoberta Geral** | Focused Crawling Semântico (P1-05) | **Implementado & Testado** | `internal/worker/worker.go` (score por termos de query da campanha, documentos técnicos e identificadores alfanuméricos/CVEs) |
+| **Origin Clustering Anti-Cópia** | Thread-Safe (P1-06) | **Implementado & Testado** | `internal/evidence/clustering.go` (`sync.RWMutex`, N réplicas em domínios clonados = 1 único cluster de origem) |
+| **Git Eye / Descoberta em Repositórios** | Rastreamento Local e Remoto (P1-07)| **Implementado & Testado** | `internal/discovery/git_local.go` (resolução do SHA-1 real de commit via `git rev-parse HEAD` / `.git/refs/heads/`, pesquisa em `.cfg`, `.rsc`, `.conf`, `.md`) |
+| **Extração de Citações e Links em PDFs** | Descoberta em Manuais (P1-08) | **Implementado & Testado** | `internal/extract/extract.go` (`ExtractURLLinks` extrai citações de URLs e links embutidos em PDFs e textos puros para novas descobertas na fronteira) |
+| **PostgreSQL 18 + SKIP LOCKED** | Fila e Storage Concorrente | **Implementado & Testado** | `internal/store/store.go`, `store_integration_test.go` (advisory lock dedicado em migrações e multi-origem em arestas) |
+| **SearXNG API / Metabusca JSON** | Descoberta Externa Semântica | **Implementado & Configurado** | `config/searxng/settings.yml`, `docker-compose.yml` (formato JSON ativo) |
+| **OCR Avançado (Tesseract / Docling)** | Documentos Escaneados | **Planejado / Próxima Fase**| PDFs textuais suportados nativamente; pipeline OCR para imagens/scans aguarda container dedicado com limite de CPU |
 | **Busca Semântica com Embeddings (pgvector)** | Vetores e Reranker | **Planejado para V3** | Atualmente exact + FTS tsvector + trigramas pg_trgm ativo no PostgreSQL |
 
 ## O que já funciona
 
 - **Campanhas** com pergunta, seeds, orçamento, pausa, retomada e agendamento contínuo.
-- **Descoberta** por links internos recursivos, SearXNG (opcional) e GitHub (opcional).
-- **Grafo Visual de Descoberta** na UI representando as ramificações em árvore ("água e eletricidade").
-- **Crawler seguro** com fila persistente no PostgreSQL 18 (`SKIP LOCKED`), robots.txt e proteção anti-SSRF/DNS rebinding.
-- **Coleta e extração** de HTML, texto e PDFs digitais (com fallback OCR).
-- **Storage content-addressed** imutável por SHA-256 com escrita atômica.
+- **Descoberta Multi-Executor** por links recursivos, SearXNG (opcional), GitHub e Git local.
+- **Roteador Inteligente** despachando requisições conforme perfil de destino (SPA/JS via Playwright, catálogos via Scrapy, estáticos via Native).
+- **Grafo Visual de Descoberta** na UI representando as ramificações em árvore e convergência multi-origens.
+- **Crawler seguro** com fila persistente no PostgreSQL 18 (`SKIP LOCKED`), robots.txt e proteção anti-SSRF/DNS rebinding com firewall de subrecursos.
+- **Coleta e extração** de HTML, texto e PDFs digitais com extração de citações e hyperlinks embutidos.
+- **Storage content-addressed (CAS)** imutável por SHA-256 do conteúdo bruto original com escrita atômica.
 - **Classificador Telecom Multivendor** (Huawei VRP, MikroTik RouterOS v6/v7, Cisco IOS-XR/XE, Datacom DmOS, ZTE, FiberHome, VSOL, SonicWall, Hillstone).
-- **Origin Clustering & Anti-Cópia** (agrupa blogs e espelhos duplicados para não inflar confirmações falsas).
-- **Motor de Claims e Auditoria Epistemológica** (`sustained`, `corroborated`, `contested`, `unconfirmed`).
+- **Origin Clustering & Anti-Cópia** (agrupa espelhos e reposts para não inflar confirmações falsas).
+- **Motor de Evidências Epistemológico** estruturado (`sustained`, `corroborated`, `contested`, `documented`, `unconfirmed`) com verificação atômica de requisitos.
 - **Investigação com IA & Dossiê Técnico** estruturado (matriz de compatibilidade, comandos CLI com proveniência, rollback e checklist).
-- **Busca Híbrida** exata (preserva pontuação de CLI), lexical (`tsvector`), trigramas (`pg_trgm`) e busca em Git local.
-- **Agendamentos e Alertas** de mudança de firmware/documentação técnica.
+- **Busca Híbrida** exata (preserva pontuação de CLI), lexical (`tsvector`), trigramas (`pg_trgm`) e busca em Git local com hash de commit.
+- **Agendamentos e Alertas** de mudança técnica.
 - **Painel Svelte moderno** embutido diretamente no binário Go.
 - **Docker Compose** pronto para subir com PostgreSQL 18 e aplicação.
 
