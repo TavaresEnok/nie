@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,13 +20,41 @@ type Mwmbl struct {
 
 func NewMwmbl(baseURL string) *Mwmbl {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		baseURL = "https://mwmbl.org"
+	if baseURL == "" || baseURL == "https://mwmbl.org" {
+		baseURL = "https://api.mwmbl.org"
 	}
 	return &Mwmbl{
 		base:   baseURL,
 		client: &http.Client{Timeout: 15 * time.Second},
 	}
+}
+
+func parseMwmblText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		return str
+	}
+	var parts []struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Value)
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+type mwmblItem struct {
+	URL     string          `json:"url"`
+	Title   json.RawMessage `json:"title"`
+	Extract json.RawMessage `json:"extract"`
+	Snippet string          `json:"snippet"`
 }
 
 func (m *Mwmbl) Search(ctx context.Context, query string, limit int) ([]Result, error) {
@@ -36,7 +65,13 @@ func (m *Mwmbl) Search(ctx context.Context, query string, limit int) ([]Result, 
 		limit = 10
 	}
 
-	endpoint := fmt.Sprintf("%s/api/search?q=%s", m.base, url.QueryEscape(query))
+	var endpoint string
+	if strings.Contains(m.base, "mwmbl.org") {
+		endpoint = fmt.Sprintf("https://api.mwmbl.org/api/v1/search/?s=%s", url.QueryEscape(query))
+	} else {
+		endpoint = fmt.Sprintf("%s/api/search?q=%s", m.base, url.QueryEscape(query))
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -54,20 +89,77 @@ func (m *Mwmbl) Search(ctx context.Context, query string, limit int) ([]Result, 
 		return nil, fmt.Errorf("Mwmbl HTTP %d", resp.StatusCode)
 	}
 
-	var payload struct {
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ler corpo Mwmbl: %w", err)
+	}
+	bodyStr := strings.TrimSpace(string(bodyBytes))
+	if len(bodyStr) == 0 {
+		return []Result{}, nil
+	}
+
+	out := make([]Result, 0, limit)
+
+	// Resposta array nativa da api.mwmbl.org: [ {"url": "...", "title": [...]}, ... ]
+	if strings.HasPrefix(bodyStr, "[") {
+		var items []mwmblItem
+		if err := json.Unmarshal(bodyBytes, &items); err != nil {
+			return nil, fmt.Errorf("parse Mwmbl JSON array: %w", err)
+		}
+		for _, item := range items {
+			if item.URL == "" {
+				continue
+			}
+			snip := parseMwmblText(item.Extract)
+			if snip == "" {
+				snip = item.Snippet
+			}
+			out = append(out, Result{
+				URL:     item.URL,
+				Title:   parseMwmblText(item.Title),
+				Snippet: snip,
+				Source:  "mwmbl",
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		return out, nil
+	}
+
+	// Resposta encapsulada em objeto {...} (mocks de teste ou gateways)
+	var rawObj struct {
 		Results []struct {
 			URL     string `json:"url"`
 			Title   string `json:"title"`
 			Snippet string `json:"snippet"`
 		} `json:"results"`
+		Value []mwmblItem `json:"value"`
+	}
+	if err := json.Unmarshal(bodyBytes, &rawObj); err != nil {
+		return nil, fmt.Errorf("parse Mwmbl JSON object: %w", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("parse Mwmbl JSON: %w", err)
+	for _, item := range rawObj.Value {
+		if item.URL == "" {
+			continue
+		}
+		snip := parseMwmblText(item.Extract)
+		if snip == "" {
+			snip = item.Snippet
+		}
+		out = append(out, Result{
+			URL:     item.URL,
+			Title:   parseMwmblText(item.Title),
+			Snippet: snip,
+			Source:  "mwmbl",
+		})
+		if len(out) >= limit {
+			break
+		}
 	}
 
-	out := make([]Result, 0, limit)
-	for _, item := range payload.Results {
+	for _, item := range rawObj.Results {
 		if item.URL == "" {
 			continue
 		}
@@ -81,5 +173,6 @@ func (m *Mwmbl) Search(ctx context.Context, query string, limit int) ([]Result, 
 			break
 		}
 	}
+
 	return out, nil
 }
