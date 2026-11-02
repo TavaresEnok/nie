@@ -58,12 +58,20 @@ def validate_public_target(url: str):
     except socket.gaierror as e:
         raise HTTPException(status_code=400, detail=f"Erro de resolução DNS: {e}")
 
+PLAYWRIGHT_AVAILABLE = False
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "worker": "crawl4ai",
         "version": "2.1.0",
+        "playwright_enabled": PLAYWRIGHT_AVAILABLE,
         "capabilities": ["browser", "markdown", "ssrf_guard"]
     }
 
@@ -91,33 +99,60 @@ def html_to_markdown(soup: BeautifulSoup) -> str:
     return "\n".join(lines)
 
 @app.post("/crawl", response_model=CrawlResponse)
-def crawl(req: CrawlRequest):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 NIE-Crawl4AI/2.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
+async def crawl(req: CrawlRequest):
+    validate_public_target(req.url)
 
-    session = requests.Session()
-    curr_url = req.url
-    resp = None
+    html_content = ""
+    effective_url = req.url
+    status_code = 200
 
-    for _ in range(5):
-        validate_public_target(curr_url)
+    if req.mode == "browser" and PLAYWRIGHT_AVAILABLE:
         try:
-            resp = session.get(curr_url, headers=headers, timeout=30, allow_redirects=False)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Erro ao renderizar via Crawl4AI bridge: {e}")
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 NIE-Crawl4AI/2.1")
+                page = await context.new_page()
+                resp = await page.goto(req.url, timeout=30000, wait_until="domcontentloaded")
+                effective_url = page.url
+                validate_public_target(effective_url)
+                status_code = resp.status if resp else 200
+                html_content = await page.content()
+                await browser.close()
+        except Exception:
+            # Fallback transparente para coletor HTTP caso o browser encontre restrições
+            html_content = ""
 
-        if resp.status_code in (301, 302, 303, 307, 308):
-            loc = resp.headers.get("Location")
-            if not loc:
-                break
-            curr_url = urljoin(curr_url, loc)
-            continue
-        break
+    if not html_content:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 NIE-Crawl4AI/2.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
 
-    if resp is None:
-        raise HTTPException(status_code=502, detail="Nenhuma resposta recebida do destino")
+        session = requests.Session()
+        curr_url = req.url
+        resp = None
+
+        for _ in range(5):
+            validate_public_target(curr_url)
+            try:
+                resp = session.get(curr_url, headers=headers, timeout=30, allow_redirects=False)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Erro ao renderizar via Crawl4AI bridge: {e}")
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location")
+                if not loc:
+                    break
+                curr_url = urljoin(curr_url, loc)
+                continue
+            break
+
+        if resp is None:
+            raise HTTPException(status_code=502, detail="Nenhuma resposta recebida do destino")
+
+        status_code = resp.status_code
+        effective_url = curr_url
+        html_content = resp.text
 
     soup = BeautifulSoup(resp.text, "html.parser")
     markdown = html_to_markdown(soup)

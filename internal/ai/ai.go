@@ -42,14 +42,65 @@ func NewService(cfg Config) *Service {
 	}
 }
 
-// PlanSubquestions generates subqueries to deepen research.
+// PlanSubquestions generates subqueries to deepen research with vendor awareness.
 func (s *Service) PlanSubquestions(ctx context.Context, query string) []string {
-	// Deterministic rule-based expansion
-	base := []string{
-		fmt.Sprintf("%s syntax CLI example configuration", query),
-		fmt.Sprintf("%s troubleshooting verification display show", query),
-		fmt.Sprintf("%s limitations caveats compatibility firmware", query),
-		fmt.Sprintf("%s failover redundancy high availability", query),
+	cl := classifier.Classify(query, "")
+	var base []string
+	cleanQ := strings.TrimSpace(query)
+
+	if len(cl.Vendors) > 0 {
+		v := cl.Vendors[0]
+		switch v.Name {
+		case "Huawei":
+			base = append(base,
+				fmt.Sprintf("%s VRP display current-configuration syntax", cleanQ),
+				fmt.Sprintf("%s HedEx product documentation release notes", cleanQ),
+				fmt.Sprintf("%s rollback configuration undo syntax caveats", cleanQ),
+				fmt.Sprintf("%s troubleshooting operational verification", cleanQ),
+			)
+		case "MikroTik":
+			base = append(base,
+				fmt.Sprintf("%s RouterOS v7 syntax difference v6 routing filter", cleanQ),
+				fmt.Sprintf("%s CLI print detail export command", cleanQ),
+				fmt.Sprintf("%s Safe Mode caveats known limitations", cleanQ),
+				fmt.Sprintf("%s forum mikrotik official documentation", cleanQ),
+			)
+		case "Cisco":
+			base = append(base,
+				fmt.Sprintf("%s IOS-XR commit confirmed rollback configuration", cleanQ),
+				fmt.Sprintf("%s show running-config syntax verification", cleanQ),
+				fmt.Sprintf("%s caveats bug search release notes", cleanQ),
+				fmt.Sprintf("%s Cisco TAC deployment guideline", cleanQ),
+			)
+		case "Datacom":
+			base = append(base,
+				fmt.Sprintf("%s DmOS show running-config syntax route-map", cleanQ),
+				fmt.Sprintf("%s manual configuracao suporte datacom", cleanQ),
+				fmt.Sprintf("%s firmware release notes limitacoes", cleanQ),
+				fmt.Sprintf("%s interface L3 vlan comandos", cleanQ),
+			)
+		case "FiberHome":
+			base = append(base,
+				fmt.Sprintf("%s AN5516 AN6000 manual configuracao CLI", cleanQ),
+				fmt.Sprintf("%s TL1 northbound interface commands", cleanQ),
+				fmt.Sprintf("%s ONU authorization profile provisioning", cleanQ),
+				fmt.Sprintf("%s firmware update troubleshooting", cleanQ),
+			)
+		default:
+			base = append(base,
+				fmt.Sprintf("%s %s CLI configuration syntax example", cleanQ, v.Name),
+				fmt.Sprintf("%s %s verification show display commands", cleanQ, v.Name),
+				fmt.Sprintf("%s %s limitations caveats firmware", cleanQ, v.Name),
+				fmt.Sprintf("%s %s failover redundancy high availability", cleanQ, v.Name),
+			)
+		}
+	} else {
+		base = []string{
+			fmt.Sprintf("%s syntax CLI example configuration", cleanQ),
+			fmt.Sprintf("%s troubleshooting verification display show", cleanQ),
+			fmt.Sprintf("%s limitations caveats compatibility firmware", cleanQ),
+			fmt.Sprintf("%s failover redundancy high availability", cleanQ),
+		}
 	}
 
 	if s.cfg.Provider == "none" || s.cfg.BaseURL == "" {
@@ -76,16 +127,34 @@ func (s *Service) PlanSubquestions(ctx context.Context, query string) []string {
 	return out
 }
 
+type CommandProvenance struct {
+	Command string
+	Domain  string
+	URL     string
+}
+
 // GenerateInvestigationDossier creates a full technical dossier based on claims and verified passages.
 func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign domain.Campaign, claims []domain.Claim, passages []domain.SearchResult) domain.InvestigationDossier {
 	var cliCommands []string
+	var cmdProvenance []CommandProvenance
+	seenCmd := make(map[string]bool)
 	var warnings []string
 	compatibilityMatrix := make(map[string]string)
 	var keyFindings []string
 
 	for _, p := range passages {
 		cl := classifier.Classify(p.Snippet, p.Domain)
-		cliCommands = append(cliCommands, cl.CLICommands...)
+		for _, cmd := range cl.CLICommands {
+			if !seenCmd[cmd] {
+				seenCmd[cmd] = true
+				cliCommands = append(cliCommands, cmd)
+				cmdProvenance = append(cmdProvenance, CommandProvenance{
+					Command: cmd,
+					Domain:  p.Domain,
+					URL:     p.URL,
+				})
+			}
+		}
 		for _, v := range cl.Vendors {
 			if v.OS != "" {
 				compatibilityMatrix[v.Name] = v.OS
@@ -130,8 +199,15 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 		md.WriteString("*Nenhum fabricante específico isolado nas evidências coletadas.*\n\n")
 	}
 
-	md.WriteString("## 3. Comandos CLI Verificados com Proveniência\n\n")
-	if len(cliCommands) > 0 {
+	md.WriteString("## 3. Comandos e Sintaxes CLI Identificados nas Evidências (Hipóteses Preliminares)\n\n")
+	md.WriteString("> **Aviso Epistemológico:** Os comandos abaixo foram extraídos textualmente a partir dos documentos catalogados. Eles constituem **hipóteses preliminares de configuração** e **NÃO foram individualmente executados ou homologados em bancada de laboratório**. É obrigatória a validação da sintaxe exata para a release e licença do seu equipamento antes de qualquer aplicação em ambiente de produção.\n\n")
+	if len(cmdProvenance) > 0 {
+		md.WriteString("| Linha / Comando CLI | Domínio de Origem | Rastreabilidade |\n|---|---|---|\n")
+		for _, cp := range cmdProvenance {
+			md.WriteString(fmt.Sprintf("| `%s` | %s | `%s` |\n", cp.Command, cp.Domain, cp.URL))
+		}
+		md.WriteString("\n")
+	} else if len(cliCommands) > 0 {
 		md.WriteString("```text\n")
 		for _, cmd := range cliCommands {
 			md.WriteString(cmd + "\n")

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import requests
 import scrapy
 from scrapy.http import HtmlResponse
+from scrapy.linkextractors import LinkExtractor
 from bs4 import BeautifulSoup
 
 app = FastAPI(title="NIE Scrapy Worker Bridge", version="2.1.0")
@@ -104,9 +105,14 @@ def crawl(req: CrawlRequest):
     if len(raw_bytes) > req.max_bytes:
         raise HTTPException(status_code=413, detail="Tamanho de conteúdo excedeu max_bytes")
 
-    # Utiliza Scrapy HtmlResponse para parsing e extração de links nativos
+    # Utiliza Scrapy HtmlResponse e Scrapy LinkExtractor nativo
     scrapy_resp = HtmlResponse(url=curr_url, body=raw_bytes, encoding="utf-8")
-    extracted_links_raw = scrapy_resp.xpath("//a/@href").getall()
+    extractor = LinkExtractor(
+        deny_extensions=['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'zip', 'tar', 'gz', 'exe', 'bin', 'mp4'],
+        tags=('a', 'area'),
+        attrs=('href',)
+    )
+    extracted_scrapy_links = extractor.extract_links(scrapy_resp)
 
     soup = BeautifulSoup(raw_bytes.decode("utf-8", errors="replace"), "html.parser")
     for s in soup(["script", "style", "noscript", "svg", "header", "footer"]):
@@ -114,12 +120,8 @@ def crawl(req: CrawlRequest):
     text = soup.get_text(separator="\n", strip=True)
 
     links = []
-    base_url = curr_url
-    for href in extracted_links_raw:
-        href = href.strip()
-        if href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            continue
-        full_url = urljoin(base_url, href)
+    for l in extracted_scrapy_links:
+        full_url = l.url.strip()
         parsed = urlparse(full_url)
         if parsed.scheme in ("http", "https"):
             links.append(full_url)
