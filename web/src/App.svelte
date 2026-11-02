@@ -53,7 +53,7 @@
       max_domains: 20,
       max_bytes: 1073741824,
       min_domain_interval_seconds: 10,
-      use_web_discovery: true,
+      use_web_discovery: false,
       use_git_discovery: false,
       use_mwmbl_discovery: true,
       use_swh_discovery: false
@@ -162,11 +162,10 @@
         max_urls: Number(form.max_urls),
         max_domains: Number(form.max_domains),
         max_bytes: Number(form.max_bytes),
-        min_domain_interval_seconds: Number(form.min_domain_interval_seconds),
-        use_web_discovery: !!form.use_web_discovery,
-        use_git_discovery: !!form.use_git_discovery,
-        use_mwmbl_discovery: !!form.use_mwmbl_discovery,
-        use_swh_discovery: !!form.use_swh_discovery
+        use_web_discovery: meta.web_discovery && !!form.use_web_discovery,
+        use_git_discovery: meta.git_discovery && !!form.use_git_discovery,
+        use_mwmbl_discovery: meta.mwmbl_discovery && !!form.use_mwmbl_discovery,
+        use_swh_discovery: meta.software_heritage_discovery && !!form.use_swh_discovery
       }
       const c = await api('/api/campaigns', { method: 'POST', body: JSON.stringify(payload) })
       notice = 'Campanha criada e enfileirada com sucesso.'
