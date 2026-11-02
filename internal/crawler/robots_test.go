@@ -1,7 +1,12 @@
 package crawler
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,4 +114,64 @@ func mustURL(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// Um robots.txt inalcançável não é permissão (RFC 9309): bloqueia por pouco tempo.
+func TestRobotsUnreachableDeniesTemporarily(t *testing.T) {
+	for _, err := range []error{
+		errors.New("dial tcp: i/o timeout"),
+		fmt.Errorf("tls: handshake failure"),
+		fmt.Errorf("%w: resolve apenas para IPs privados", ErrBlocked),
+	} {
+		e := robotsEntryFromError(err)
+		if !e.denyAll || e.allowAll {
+			t.Errorf("erro %q deveria bloquear: %+v", err, e)
+		}
+		if time.Until(e.expiresAt) > 2*time.Minute {
+			t.Errorf("o bloqueio por indisponibilidade deve durar pouco: %v", time.Until(e.expiresAt))
+		}
+	}
+	// Resposta que o NIE não sabe interpretar libera, também por pouco tempo.
+	if e := robotsEntryFromError(fmt.Errorf("%w: application/json", ErrUnsupportedType)); !e.allowAll {
+		t.Errorf("tipo inesperado deveria liberar: %+v", e)
+	}
+	// Status HTTP seguem a RFC: 404 libera; 5xx bloqueia; 2xx usa as regras.
+	if e := robotsEntryFromResponse(404, nil, time.Hour); !e.allowAll {
+		t.Error("404 deve liberar")
+	}
+	if e := robotsEntryFromResponse(503, nil, time.Hour); !e.denyAll {
+		t.Error("503 deve bloquear")
+	}
+}
+
+// O destino de um redirecionamento também passa pelo robots.txt.
+func TestRedirectIsCheckedAgainstRobots(t *testing.T) {
+	f := &Fetcher{}
+	var checked []string
+	f.SetRedirectCheck(func(ctx context.Context, u *url.URL) error {
+		checked = append(checked, u.Path)
+		if strings.HasPrefix(u.Path, "/private") {
+			return fmt.Errorf("%w: %s", ErrRobotsDisallowed, u)
+		}
+		return nil
+	})
+	req := func(raw string) *http.Request {
+		r, _ := http.NewRequest(http.MethodGet, raw, nil)
+		return r
+	}
+	if err := f.checkRedirect(req("https://other.example.org/private/x"), nil); !errors.Is(err, ErrRobotsDisallowed) {
+		t.Errorf("redirect para caminho vetado deveria falhar: %v", err)
+	}
+	if err := f.checkRedirect(req("https://other.example.org/public"), nil); err != nil {
+		t.Errorf("redirect permitido falhou: %v", err)
+	}
+	// /robots.txt não consulta o robots (evita recursão).
+	n := len(checked)
+	if err := f.checkRedirect(req("https://other.example.org/robots.txt"), nil); err != nil || len(checked) != n {
+		t.Errorf("/robots.txt não deve acionar a verificação: err=%v", err)
+	}
+	// Destinos internos continuam bloqueados antes do robots.
+	if err := f.checkRedirect(req("http://127.0.0.1/admin"), nil); err == nil {
+		t.Error("redirect para loopback deveria ser bloqueado")
+	}
 }

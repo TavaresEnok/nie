@@ -54,6 +54,16 @@ func (e *jobError) Unwrap() error { return e.err }
 func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robots *crawler.Robots,
 	searx *discovery.SearXNG, github *discovery.GitHub, cfg config.Config, logger *slog.Logger) *Worker {
 
+	// Redirecionamentos também precisam respeitar o robots.txt do destino final.
+	if robots != nil && fetcher != nil {
+		fetcher.SetRedirectCheck(func(ctx context.Context, u *url.URL) error {
+			if !robots.Allowed(ctx, u) {
+				return fmt.Errorf("%w: %s", crawler.ErrRobotsDisallowed, u.String())
+			}
+			return nil
+		})
+	}
+
 	router := crawler.NewRouter()
 	native := crawler.NewNativeExecutor(fetcher)
 	router.Register(native)
@@ -265,15 +275,8 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		executor = "scrapy"
 	}
 
-	// Teto por documento: o orçamento da campanha (budget.MaxBytes) é um total,
-	// não um limite de recurso individual.
-	perDocument := w.cfg.MaxHTMLBytes
-	if strings.HasSuffix(strings.ToLower(u.Path), ".pdf") {
-		perDocument = w.cfg.MaxPDFBytes
-	}
-	if budget.MaxBytes > 0 && budget.MaxBytes < perDocument {
-		perDocument = budget.MaxBytes
-	}
+	perDocument := documentByteLimit(w.cfg.MaxHTMLBytes, w.cfg.MaxPDFBytes,
+		strings.HasSuffix(strings.ToLower(u.Path), ".pdf"), budget.MaxBytes, used)
 
 	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, perDocument)
 	fetchResult, err := w.router.Execute(ctx, task)
@@ -580,6 +583,28 @@ func (w *Worker) processSoftwareHeritage(ctx context.Context, job *domain.Job) e
 	return nil
 }
 
+// documentByteLimit calcula o teto de um download: o limite do tipo de
+// documento (HTML ou PDF), reduzido ao saldo restante do orçamento de bytes da
+// campanha (maxBytes - used). O saldo evita que uma campanha com 9 MiB de 10 MiB
+// usados baixe mais 5 MiB. Com vários workers simultâneos o excesso fica
+// limitado a (workers - 1) documentos, pois a reserva não é atômica.
+func documentByteLimit(maxHTML, maxPDF int64, isPDF bool, maxBytes, used int64) int64 {
+	limit := maxHTML
+	if isPDF {
+		limit = maxPDF
+	}
+	if maxBytes > 0 {
+		remaining := maxBytes - used
+		if remaining < 1 {
+			remaining = 1
+		}
+		if remaining < limit {
+			limit = remaining
+		}
+	}
+	return limit
+}
+
 // preserveUnextracted arquiva o documento original no CAS e registra um
 // documento sem texto, marcado como extraction_pending, quando a extração falha
 // ou não produz texto. O original e seu SHA-256 ficam disponíveis para um
@@ -623,6 +648,7 @@ func classifyFetchError(err error) error {
 	case errors.Is(err, crawler.ErrBlocked),
 		errors.Is(err, crawler.ErrTooLarge),
 		errors.Is(err, crawler.ErrUnsupportedType),
+		errors.Is(err, crawler.ErrRobotsDisallowed),
 		errors.Is(err, urlutil.ErrInvalidURL),
 		errors.Is(err, urlutil.ErrUnsupported),
 		errors.Is(err, urlutil.ErrPrivateHost):

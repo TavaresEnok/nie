@@ -124,14 +124,36 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 		t.Errorf("Duas origens independentes com firmware verificado devem ser corroborated/applicable, obteve %s/%s", c4.Status, c4.Applicability)
 	}
 
-	// Adversarial Case 5: Contradição ou sintaxe obsoleta/depreciada
+	// Case 5: refutação que trata do mesmo fabricante, modelo, firmware e recurso
+	// torna a claim contestada e o cenário incompatível.
 	c5 := &domain.Claim{Title: "BGP Test 5"}
 	eng.ResolveClaimStatus(c5, []domain.Evidence{
 		{ID: "e1", Stance: "supports", IsOfficialDoc: true, Notes: "Fonte: huawei.com"},
-		{ID: "e2", Stance: "refutes", Notes: "Fonte: forum.huawei.com (sintaxe obsoleta no V8)"},
+		{ID: "e2", Stance: "refutes", VendorMatch: true, ModelMatch: true, FirmwareMatch: true, FeatureMatch: true,
+			Notes: "Fonte: forum.huawei.com (sintaxe obsoleta no V8)"},
 	})
 	if c5.Status != "contested" || c5.Applicability != "incompatible" {
-		t.Errorf("Contradição deve resultar em contested/incompatible, obteve %s/%s", c5.Status, c5.Applicability)
+		t.Errorf("Refutação com escopo completo deve resultar em contested/incompatible, obteve %s/%s", c5.Status, c5.Applicability)
+	}
+
+	// Case 6: refutação do fabricante e recurso, sem comprovar modelo/firmware:
+	// contesta a claim, mas não decide a incompatibilidade do equipamento.
+	c6 := &domain.Claim{Title: "BGP Test 6"}
+	eng.ResolveClaimStatus(c6, []domain.Evidence{
+		{ID: "e1", Stance: "refutes", VendorMatch: true, FeatureMatch: true, Notes: "Fonte: forum.huawei.com"},
+	})
+	if c6.Status != "contested" || c6.Applicability != "indeterminate" {
+		t.Errorf("Refutação sem modelo/firmware deve ser contested/indeterminate, obteve %s/%s", c6.Status, c6.Applicability)
+	}
+
+	// Case 7: refutação fora do escopo (outro fabricante/recurso) é ignorada.
+	c7 := &domain.Claim{Title: "BGP Test 7"}
+	eng.ResolveClaimStatus(c7, []domain.Evidence{
+		{ID: "e1", Stance: "supports", IsOfficialDoc: true, Notes: "Fonte: huawei.com"},
+		{ID: "e2", Stance: "refutes", Notes: "Fonte: forum.cisco.com"},
+	})
+	if c7.Status != "documented" || c7.Applicability != "indeterminate" {
+		t.Errorf("Refutação fora de escopo não pode contestar a claim, obteve %s/%s", c7.Status, c7.Applicability)
 	}
 }
 
@@ -364,4 +386,3 @@ func TestAudit_DocumentedPassageWithoutModelEvidence(t *testing.T) {
 		}
 	}
 }
-

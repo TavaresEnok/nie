@@ -51,30 +51,36 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 	touched := make(map[string]bool)       // UUIDs de clusters usados
 
 	for _, c := range claims {
+		// A unicidade (campaign_id, title) é imposta pelo banco (migração 0006),
+		// então investigações concorrentes não duplicam. Claims com validação
+		// operacional (lab_validated/failed) são imutáveis: a nova investigação
+		// não altera status nem apaga as evidências que sustentam a validação.
 		var claimID string
 		err := tx.QueryRow(ctx, `
-			SELECT id::text FROM claims WHERE campaign_id=$1::uuid AND title=$2
-			ORDER BY created_at ASC LIMIT 1 FOR UPDATE`, c.CampaignID, c.Title).Scan(&claimID)
+			INSERT INTO claims (campaign_id, title, statement, status, applicability, operational_validation)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (campaign_id, title) DO UPDATE
+			SET statement = EXCLUDED.statement, status = EXCLUDED.status,
+			    applicability = EXCLUDED.applicability, updated_at = now()
+			WHERE claims.operational_validation = 'untested'
+			RETURNING id::text`,
+			c.CampaignID, c.Title, c.Statement, c.Status, c.Applicability, c.OperationalValidation).Scan(&claimID)
 		switch {
 		case err == nil:
-			if _, err := tx.Exec(ctx, `
-				UPDATE claims SET statement=$2, status=$3, applicability=$4, updated_at=now()
-				WHERE id=$1::uuid`, claimID, c.Statement, c.Status, c.Applicability); err != nil {
-				return fmt.Errorf("atualizar claim: %w", err)
-			}
+			// Inserido ou atualizado: as evidências são substituídas pelo novo conjunto.
 			if _, err := tx.Exec(ctx, `DELETE FROM evidence WHERE claim_id=$1::uuid`, claimID); err != nil {
 				return fmt.Errorf("limpar evidências do claim: %w", err)
 			}
 		case errors.Is(err, pgx.ErrNoRows):
-			if err := tx.QueryRow(ctx, `
-				INSERT INTO claims (campaign_id, title, statement, status, applicability, operational_validation)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				RETURNING id::text`,
-				c.CampaignID, c.Title, c.Statement, c.Status, c.Applicability, c.OperationalValidation).Scan(&claimID); err != nil {
-				return fmt.Errorf("inserir claim: %w", err)
+			// Claim validado: mantém-no intacto e não grava evidências novas.
+			if err := tx.QueryRow(ctx, `SELECT id::text FROM claims WHERE campaign_id=$1::uuid AND title=$2`,
+				c.CampaignID, c.Title).Scan(&claimID); err != nil {
+				return fmt.Errorf("buscar claim validado: %w", err)
 			}
+			campaigns[c.CampaignID] = append(campaigns[c.CampaignID], claimID)
+			continue
 		default:
-			return fmt.Errorf("buscar claim existente: %w", err)
+			return fmt.Errorf("gravar claim: %w", err)
 		}
 		campaigns[c.CampaignID] = append(campaigns[c.CampaignID], claimID)
 

@@ -104,3 +104,23 @@ func TestUnextractableDocumentIsPreservedForReprocessing(t *testing.T) {
 	}
 	_, _ = st.Pool().Exec(ctx, `DELETE FROM documents WHERE sha256=$1`, sum)
 }
+
+func TestDocumentByteLimitUsesRemainingBudget(t *testing.T) {
+	const MiB = 1 << 20
+	cases := []struct {
+		name                       string
+		isPDF                      bool
+		maxBytes, used, wantApprox int64
+	}{
+		{"html com orçamento folgado", false, 1024 * MiB, 0, 5 * MiB},
+		{"pdf com orçamento folgado", true, 1024 * MiB, 0, 50 * MiB},
+		{"9 de 10 MiB usados limita a 1 MiB", false, 10 * MiB, 9 * MiB, 1 * MiB},
+		{"pdf com 3 MiB de saldo", true, 10 * MiB, 7 * MiB, 3 * MiB},
+		{"saldo esgotado nunca zera o limite", false, 10 * MiB, 10 * MiB, 1},
+	}
+	for _, tc := range cases {
+		if got := documentByteLimit(5*MiB, 50*MiB, tc.isPDF, tc.maxBytes, tc.used); got != tc.wantApprox {
+			t.Errorf("%s: limite = %d, quer %d", tc.name, got, tc.wantApprox)
+		}
+	}
+}

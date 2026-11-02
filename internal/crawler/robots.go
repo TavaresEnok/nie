@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -73,10 +74,23 @@ func (r *Robots) load(ctx context.Context, u *url.URL) robotsEntry {
 	defer cancel()
 	resp, err := r.fetcher.Fetch(ctx, robotsURL)
 	if err != nil {
-		r.logger.Debug("robots indisponível; permitindo com cache curto", "host", u.Host, "err", err)
-		return robotsEntry{allowAll: true, expiresAt: time.Now().Add(5 * time.Minute)}
+		entry := robotsEntryFromError(err)
+		r.logger.Warn("robots.txt não pôde ser lido", "host", u.Host, "bloqueado", entry.denyAll, "err", err)
+		return entry
 	}
 	return robotsEntryFromResponse(resp.StatusCode, resp.Body, r.ttl)
+}
+
+// robotsEntryFromError decide o que fazer quando o robots.txt não pôde ser
+// obtido. A RFC 9309 manda tratar um robots.txt inalcançável (timeout, falha
+// de rede ou TLS, destino bloqueado) como proibição total, por pouco tempo:
+// uma indisponibilidade temporária não é permissão. Só uma resposta que o NIE
+// não sabe interpretar (tipo ou tamanho inesperado) libera, também por pouco tempo.
+func robotsEntryFromError(err error) robotsEntry {
+	if errors.Is(err, ErrUnsupportedType) || errors.Is(err, ErrTooLarge) {
+		return robotsEntry{allowAll: true, expiresAt: time.Now().Add(5 * time.Minute)}
+	}
+	return robotsEntry{denyAll: true, expiresAt: time.Now().Add(time.Minute)}
 }
 
 // robotsEntryFromResponse aplica a política de robots.txt da RFC 9309:

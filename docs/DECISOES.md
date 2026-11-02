@@ -157,3 +157,29 @@ scheduler/`JOBDIR` do Scrapy.
 **Limites conhecidos:** a classificação ainda é lexical; o ciclo adaptativo
 continua manual; PostgreSQL 18, navegador real, isolamento de rede dos workers,
 backup/restauração e a campanha de ponta a ponta continuam sem prova.
+
+## ADR-012 — Escopo das refutações e negação explícita (auditoria 4)
+
+**Status:** aceito (implementado em 02/11/2026)  
+**Contexto:** a quarta auditoria reproduziu três falhas: uma negação
+("does not support BGP") classificada como suporte comprovado; a sigla `HA`
+detectada dentro de palavras comuns (`what`); e uma refutação sem escopo
+tornando o equipamento incompatível.  
+**Decisão:**
+- termos de fabricante, firmware, modelo e recurso casam como palavra inteira
+  (`hasToken`); `HA` só vale como sigla em maiúsculas ou por extenso;
+- negação explícita de suporte em PT/EN/ES gera `refutes`; enunciado
+  condicional ou parcial gera `mentions`; outro fabricante ou release não
+  refuta nem prova (`mentions`);
+- uma refutação só conta quando trata do fabricante **e** do recurso pedidos:
+  então `contested`, e `incompatible` apenas se casar também modelo e firmware;
+  fora disso é ignorada;
+- claims com validação operacional (`lab_validated`/`failed`) são imutáveis para
+  novas investigações; `(campanha, título)` é único no banco;
+- `robots.txt` inalcançável bloqueia temporariamente; redirecionamentos passam
+  pelo robots do destino; o download é limitado pelo saldo do orçamento de bytes.  
+**Limites:** as listas de negação e qualificação são regras lexicais; frases
+que não seguem esses padrões ainda podem ser mal classificadas. Uma prova
+semântica exige leitura da proposição (modelo ou revisão humana) e continua
+pendente, assim como o ciclo autônomo, o isolamento de rede dos workers, o
+PostgreSQL 18 e a campanha de ponta a ponta.

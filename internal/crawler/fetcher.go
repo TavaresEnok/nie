@@ -20,6 +20,8 @@ var (
 	ErrBlocked         = errors.New("destino bloqueado pela política de egress")
 	ErrTooLarge        = errors.New("recurso excede o limite de tamanho")
 	ErrUnsupportedType = errors.New("tipo de conteúdo não suportado")
+	// ErrRobotsDisallowed: um redirecionamento levou a uma URL vetada pelo robots.txt.
+	ErrRobotsDisallowed = errors.New("redirecionamento bloqueado por robots.txt")
 )
 
 type HTTPError struct {
@@ -46,6 +48,30 @@ type Fetcher struct {
 	maxHTML   int64
 	maxPDF    int64
 	maxText   int64
+
+	// redirectCheck é consultado a cada redirecionamento (exceto /robots.txt)
+	// para que o destino final também respeite o robots.txt do seu host.
+	redirectCheck func(ctx context.Context, u *url.URL) error
+}
+
+// SetRedirectCheck registra a verificação aplicada a cada redirecionamento.
+func (f *Fetcher) SetRedirectCheck(check func(ctx context.Context, u *url.URL) error) {
+	f.redirectCheck = check
+}
+
+func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("excesso de redirecionamentos")
+	}
+	if err := urlutil.ValidateCrawlURL(req.URL); err != nil {
+		return err
+	}
+	// O próprio robots.txt pode redirecionar (http→https); não consultar o
+	// robots para ele, o que causaria recursão.
+	if f.redirectCheck != nil && req.URL.Path != "/robots.txt" {
+		return f.redirectCheck(req.Context(), req.URL)
+	}
+	return nil
 }
 
 func NewFetcher(userAgent string, timeout time.Duration, maxHTML, maxPDF, maxText int64) *Fetcher {
@@ -88,23 +114,18 @@ func NewFetcher(userAgent string, timeout time.Duration, maxHTML, maxPDF, maxTex
 			return nil, fmt.Errorf("%w: %s resolve apenas para IPs privados/reservados", ErrBlocked, host)
 		},
 	}
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("excesso de redirecionamentos")
-			}
-			return urlutil.ValidateCrawlURL(req.URL)
-		},
-	}
-	return &Fetcher{
-		client:    client,
+	f := &Fetcher{
 		userAgent: userAgent,
 		maxHTML:   maxHTML,
 		maxPDF:    maxPDF,
 		maxText:   maxText,
 	}
+	f.client = &http.Client{
+		Transport:     transport,
+		Timeout:       timeout,
+		CheckRedirect: f.checkRedirect,
+	}
+	return f
 }
 
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Response, error) {

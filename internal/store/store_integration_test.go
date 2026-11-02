@@ -726,3 +726,121 @@ func TestP1_EdgeKindPreservedForSitemapAndFeed(t *testing.T) {
 		}
 	}
 }
+
+// Claim validado em bancada é imutável: reinvestigar o mesmo título não altera
+// o status nem apaga as evidências que sustentam a validação.
+func TestP1_ValidatedClaimSurvivesReinvestigation(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "validado "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+	docID, _, err := st.RecordDocument(ctx, DocumentRecord{
+		SHA256: hashFor("validado" + fmt.Sprint(time.Now().UnixNano())), MIME: "text/html", Size: 1, Text: "x",
+		CampaignID: camp.ID, URL: "https://d.example/p", NormalizedURL: "https://d.example/p", Domain: "d.example", StatusCode: 200,
+		Passages: []domain.Passage{{Ordinal: 0, Text: "x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := domain.Claim{CampaignID: camp.ID, Title: "Failover BGP", Statement: "original", Status: "sustained", Applicability: "applicable",
+		OperationalValidation: "untested",
+		Evidences:             []domain.Evidence{{DocumentID: docID, Stance: "supports", Excerpt: "prova original", Notes: "Fonte: d.example"}}}
+	if err := st.SaveClaims(ctx, []domain.Claim{original}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `UPDATE claims SET operational_validation='lab_validated' WHERE campaign_id=$1::uuid`, camp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	redo := original
+	redo.Statement, redo.Status, redo.Applicability = "nova", "contested", "incompatible"
+	redo.Evidences = []domain.Evidence{{DocumentID: docID, Stance: "refutes", Excerpt: "outra", Notes: "Fonte: d.example"}}
+	if err := st.SaveClaims(ctx, []domain.Claim{redo}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.ListClaimsByCampaign(ctx, camp.ID)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("claims = %d err=%v", len(got), err)
+	}
+	c := got[0]
+	if c.Status != "sustained" || c.Statement != "original" || c.OperationalValidation != "lab_validated" {
+		t.Errorf("claim validado foi alterado: %+v", c)
+	}
+	if len(c.Evidences) != 1 || c.Evidences[0].Excerpt != "prova original" {
+		t.Errorf("evidências do claim validado foram alteradas: %+v", c.Evidences)
+	}
+}
+
+// Investigações simultâneas do mesmo título não criam claims duplicados.
+func TestP1_ConcurrentSaveClaimsNeverDuplicates(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "corrida "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+	claim := domain.Claim{CampaignID: camp.ID, Title: "Mesmo título", Statement: "s", Status: "unconfirmed", Applicability: "indeterminate", OperationalValidation: "untested"}
+
+	const workers = 8
+	errs := make(chan error, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			errs <- st.SaveClaims(ctx, []domain.Claim{claim})
+		}()
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("SaveClaims concorrente: %v", err)
+		}
+	}
+	var n int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM claims WHERE campaign_id=$1::uuid`, camp.ID).Scan(&n); err != nil || n != 1 {
+		t.Errorf("claims após %d chamadas simultâneas = %d (err=%v), quer 1", workers, n, err)
+	}
+}
+
+// A migração 0006 limpa duplicatas antigas, preferindo o claim validado.
+func TestP1_Migration0006DedupesExistingClaims(t *testing.T) {
+	st, ctx := newTestStore(t)
+	camp, err := st.CreateCampaign(ctx, "migracao "+fmt.Sprint(time.Now().UnixNano()), []string{"https://seed.example/a"},
+		domain.Budget{MaxDepth: 1, MaxURLs: 10, MaxDomains: 5, MaxBytes: 10 << 20, MinDomainIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCampaign(t, st, camp.ID)
+
+	if _, err := st.Pool().Exec(ctx, `DROP INDEX IF EXISTS claims_campaign_title_uq`); err != nil {
+		t.Fatal(err)
+	}
+	for i, validation := range []string{"untested", "lab_validated", "untested"} {
+		if _, err := st.Pool().Exec(ctx, `
+			INSERT INTO claims(campaign_id, title, statement, operational_validation, created_at)
+			VALUES($1::uuid, 'Duplicado', $2, $3, now() + ($4 || ' seconds')::interval)`,
+			camp.ID, fmt.Sprintf("v%d", i), validation, fmt.Sprint(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sqlText, err := migrationsFS.ReadFile("migrations/0006_claims_unique_title.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, string(sqlText)); err != nil {
+		t.Fatalf("migração 0006 sobre dados duplicados: %v", err)
+	}
+	var n int
+	var validation string
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*), max(operational_validation) FROM claims WHERE campaign_id=$1::uuid`, camp.ID).Scan(&n, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || validation != "lab_validated" {
+		t.Errorf("após a migração: %d claims, validação=%q; quer 1 claim lab_validated", n, validation)
+	}
+}

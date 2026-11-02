@@ -56,7 +56,7 @@ func ParseRequirements(query string) TargetRequirements {
 		{"fortinet", "Fortinet"},
 	}
 	for _, kv := range knownVendors {
-		if strings.Contains(lower, kv.Pattern) {
+		if hasToken(lower, kv.Pattern) {
 			req.Vendors = append(req.Vendors, kv.Name)
 		}
 	}
@@ -82,7 +82,7 @@ func ParseRequirements(query string) TargetRequirements {
 		{"timos", "TiMOS"},
 	}
 	for _, kf := range knownFirmwares {
-		if strings.Contains(lower, kf.Pattern) {
+		if hasToken(lower, kf.Pattern) {
 			req.Firmwares = append(req.Firmwares, kf.Name)
 		}
 	}
@@ -97,7 +97,7 @@ func ParseRequirements(query string) TargetRequirements {
 		"c320", "c600", "ma5800", "ma5608t", "nsa2700",
 	}
 	for _, km := range knownModels {
-		if strings.Contains(lower, km) {
+		if hasToken(lower, km) {
 			req.Models = append(req.Models, strings.ToUpper(km))
 		}
 	}
@@ -108,13 +108,17 @@ func ParseRequirements(query string) TargetRequirements {
 	// 4. Features técnicas atômicas (não colapsa BGP, RADIUS e PPPoE!)
 	knownFeatures := []string{
 		"bgp", "pppoe", "radius", "vlan", "ospf", "evpn", "mpls", "bfd",
-		"cgnat", "flowspec", "failover", "ha", "inband", "outband", "tl1",
+		"cgnat", "flowspec", "failover", "inband", "outband", "tl1",
 		"l2vpn", "pbr", "qos", "acl",
 	}
 	for _, kf := range knownFeatures {
-		if strings.Contains(lower, kf) {
+		if hasToken(lower, kf) {
 			req.Features = append(req.Features, strings.ToUpper(kf))
 		}
+	}
+	// "ha" é uma palavra comum (what, há, ha): só vale a sigla ou a expressão.
+	if requestsHA(query) {
+		req.Features = append(req.Features, "HA")
 	}
 	if len(req.Features) > 0 {
 		req.Feature = req.Features[0]
@@ -137,7 +141,10 @@ func ParseRequirements(query string) TargetRequirements {
 //   - corroborated/indeterminate: >= 2 origens independentes que sustentam, mas
 //     sem escopo comprovado.
 //   - documented/indeterminate: há documento oficial que sustenta, sem escopo.
-//   - contested/incompatible: há evidência que refuta.
+//   - Uma refutação só vale quando trata do fabricante e do recurso pedidos:
+//     refutação fora desse escopo é ignorada (não contesta nem incompatibiliza).
+//     contested/incompatible exige ainda modelo e firmware; com fabricante e
+//     recurso apenas, contested/indeterminate.
 //   - unconfirmed/indeterminate: o restante, inclusive só menções.
 //
 // Três cópias do mesmo texto são uma única origem (ClusterTracker).
@@ -148,7 +155,8 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 		return
 	}
 
-	hasContradiction := false
+	hasContradiction := false // refutação do fabricante+recurso pedidos
+	fullyRefuted := false     // refutação que também casa modelo e firmware
 	hasOfficialSupport := false
 	officialScoped := false
 
@@ -158,7 +166,12 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 	for _, ev := range evidences {
 		switch ev.Stance {
 		case "refutes":
-			hasContradiction = true
+			if ev.VendorMatch && ev.FeatureMatch {
+				hasContradiction = true
+				if ev.ModelMatch && ev.FirmwareMatch {
+					fullyRefuted = true
+				}
+			}
 			continue
 		case "supports":
 		default: // "mentions" e qualquer outro valor: relevante, mas não é prova
@@ -190,9 +203,11 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 	}
 
 	switch {
-	case hasContradiction:
+	case fullyRefuted:
 		claim.Status = "contested"
 		claim.Applicability = "incompatible"
+	case hasContradiction:
+		claim.Status = "contested"
 	case officialScoped:
 		claim.Status = "sustained"
 		claim.Applicability = "applicable"
@@ -281,7 +296,7 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		modelMatch := false
 		if len(req.Models) > 0 {
 			for _, m := range req.Models {
-				if strings.Contains(lowerSnippet, strings.ToLower(m)) {
+				if hasToken(lowerSnippet, strings.ToLower(m)) {
 					modelMatch = true
 					break
 				}
@@ -292,7 +307,7 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 		featureMatch := true
 		if len(req.Features) > 0 {
 			for _, f := range req.Features {
-				if !strings.Contains(lowerSnippet, strings.ToLower(f)) {
+				if !snippetHasFeature(f, p.Snippet, lowerSnippet) {
 					featureMatch = false
 					break
 				}
@@ -301,19 +316,21 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 			featureMatch = false
 		}
 
-		// Determina Stance com rigor epistemológico
+		// Determina o stance com rigor epistemológico:
+		//   - outro fabricante ou release não prova nem refuta o cenário pedido;
+		//   - negação explícita ("does not support", "não suporta", "no soporta")
+		//     ou palavra de obsolescência refuta; se vale para o equipamento
+		//     pedido é decidido por ResolveClaimStatus, pelos campos de escopo;
+		//   - enunciado condicional/parcial ou que só lista os termos não afirma
+		//     o recurso por inteiro: é menção.
 		stance := "supports"
-		if vendorMismatch || versionMismatch ||
-			strings.Contains(lowerSnippet, "deprecated") ||
-			strings.Contains(lowerSnippet, "obsolete") ||
-			strings.Contains(lowerSnippet, "not supported") ||
-			strings.Contains(lowerSnippet, "syntax error") ||
-			strings.Contains(lowerSnippet, "incompatible") ||
-			strings.Contains(lowerSnippet, "unsupported") {
+		switch {
+		case vendorMismatch || versionMismatch:
+			stance = "mentions"
+		case snippetRefutes(lowerSnippet):
 			stance = "refutes"
-		} else if !featureMatch || !assertsContent(lowerSnippet, len(classification.CLICommands) > 0) {
-			// Os termos aparecem, mas o trecho não afirma nada utilizável (índice,
-			// título, lista de assuntos): relevância lexical não é prova.
+		case !featureMatch || snippetIsQualified(lowerSnippet) ||
+			!assertsContent(lowerSnippet, len(classification.CLICommands) > 0):
 			stance = "mentions"
 		}
 
