@@ -10,20 +10,34 @@ import (
 var ErrOCRUnavailable = errors.New("OCR não disponível no ambiente")
 
 // OCRService provides optional external OCR via Tesseract or pdftotext CLI when available.
+// Ainda não é chamado pelo pipeline de coleta (ver README: OCR planejado).
 type OCRService struct {
 	available bool
 	cmdPath   string
+	tool      string
 }
 
 func NewOCRService() *OCRService {
-	path, err := exec.LookPath("tesseract")
+	tool := "tesseract"
+	path, err := exec.LookPath(tool)
 	if err != nil {
-		path, err = exec.LookPath("pdftotext")
+		tool = "pdftotext"
+		path, err = exec.LookPath(tool)
 	}
 	return &OCRService{
 		available: err == nil,
 		cmdPath:   path,
+		tool:      tool,
 	}
+}
+
+// ocrArgs devolve os argumentos para escrever o texto em stdout: o Tesseract
+// usa a palavra "stdout"; o pdftotext usa "-" (com "stdout" criaria um arquivo).
+func ocrArgs(tool, inputPath string) []string {
+	if tool == "pdftotext" {
+		return []string{"-layout", inputPath, "-"}
+	}
+	return []string{inputPath, "stdout"}
 }
 
 func (o *OCRService) IsAvailable() bool {
@@ -35,7 +49,7 @@ func (o *OCRService) ExtractText(ctx context.Context, inputPath string) (string,
 	if !o.available {
 		return "", ErrOCRUnavailable
 	}
-	cmd := exec.CommandContext(ctx, o.cmdPath, inputPath, "stdout")
+	cmd := exec.CommandContext(ctx, o.cmdPath, ocrArgs(o.tool, inputPath)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

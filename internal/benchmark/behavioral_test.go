@@ -5,14 +5,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"nie/internal/classifier"
 	"nie/internal/crawler"
 	"nie/internal/discovery"
-	"nie/internal/domain"
 	"nie/internal/evidence"
 	"nie/internal/extract"
 	"nie/internal/netguard"
@@ -123,20 +122,52 @@ func TestBenchmark3_UnlinkedMentionDiscovery(t *testing.T) {
 
 // 4. Buscar caminhos por sitemap/RSS e registrar arestas de descoberta.
 func TestBenchmark4_SitemapAndRSSDiscoveryEdges(t *testing.T) {
-	edge := domain.DiscoveryEdge{
-		ID:         101,
-		CampaignID: "camp-telecom-01",
-		FromURL:    "https://wiki.mikrotik.com/sitemap.xml",
-		ToURL:      "https://wiki.mikrotik.com/wiki/Manual:BGP_HowTo",
-		ToDomain:   "wiki.mikrotik.com",
-		Kind:       "sitemap",
-		Depth:      1,
-		Reason:     "descoberto via sitemap.xml",
-		CreatedAt:  time.Now(),
+	base, _ := url.Parse("https://wiki.mikrotik.com/sitemap.xml")
+
+	sitemap := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://wiki.mikrotik.com/wiki/Manual:BGP_HowTo</loc></url>
+  <url><loc>/wiki/Manual:OSPF</loc></url>
+</urlset>`)
+	if !extract.IsFeedCandidate("application/xml", base.Path) {
+		t.Fatal("sitemap XML deveria ser tratado como feed")
+	}
+	sm, err := extract.Feed(base, sitemap)
+	if err != nil {
+		t.Fatalf("parse sitemap: %v", err)
+	}
+	if sm.LinkKind != extract.LinkKindSitemap {
+		t.Errorf("aresta de sitemap deveria ter tipo %q, obteve %q", extract.LinkKindSitemap, sm.LinkKind)
+	}
+	wantSitemap := []string{"https://wiki.mikrotik.com/wiki/Manual:BGP_HowTo", "https://wiki.mikrotik.com/wiki/Manual:OSPF"}
+	if strings.Join(sm.Links, " ") != strings.Join(wantSitemap, " ") {
+		t.Errorf("URLs do sitemap = %v, quer %v", sm.Links, wantSitemap)
 	}
 
-	if edge.Kind != "sitemap" || edge.Depth != 1 {
-		t.Errorf("aresta de descoberta de sitemap inválida: %+v", edge)
+	rssBase, _ := url.Parse("https://blog.example.net/feed")
+	rss := []byte(`<rss version="2.0"><channel><title>Blog</title><link>https://blog.example.net/</link>
+  <item><title>PPPoE em NE8000</title><link>https://blog.example.net/pppoe-ne8000</link></item>
+</channel></rss>`)
+	feed, err := extract.Feed(rssBase, rss)
+	if err != nil {
+		t.Fatalf("parse RSS: %v", err)
+	}
+	if feed.LinkKind != extract.LinkKindFeed || len(feed.Links) != 1 || feed.Links[0] != "https://blog.example.net/pppoe-ne8000" {
+		t.Errorf("RSS deve gerar só o link do item com tipo feed, obteve kind=%q links=%v", feed.LinkKind, feed.Links)
+	}
+	if !strings.Contains(feed.Text, "PPPoE em NE8000") {
+		t.Errorf("título do item deve ficar citável no texto, obteve %q", feed.Text)
+	}
+
+	// Feed anunciado no <head> de uma página HTML vira pista de descoberta.
+	page, _ := url.Parse("https://blog.example.net/")
+	html, err := extract.HTML(page, "text/html", []byte(`<html><head>
+<link rel="alternate" type="application/rss+xml" href="/feed"></head><body>Blog</body></html>`))
+	if err != nil {
+		t.Fatalf("parse HTML: %v", err)
+	}
+	if len(html.FeedLinks) != 1 || html.FeedLinks[0] != "https://blog.example.net/feed" {
+		t.Errorf("autodiscovery de RSS falhou: %v", html.FeedLinks)
 	}
 }
 

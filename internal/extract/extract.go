@@ -29,6 +29,10 @@ type Result struct {
 	MIME     string
 	Links    []string
 	Passages []Passage
+	// LinkKind é o tipo de aresta para Links ("" = link HTML comum; ver feed.go).
+	LinkKind string
+	// FeedLinks são feeds RSS/Atom anunciados por <link rel="alternate"> no HTML.
+	FeedLinks []string
 }
 
 var spaceRE = regexp.MustCompile(`[ \t\f\v\x{00a0}]+`)
@@ -101,8 +105,31 @@ func HTML(base *url.URL, contentType string, body []byte) (Result, error) {
 		}
 		res.Links = append(res.Links, link)
 	}
+	res.FeedLinks = feedAutodiscovery(base, findElement(doc, "head"))
 	res.Passages = MakePassages(res.Text, nil, DefaultPassageChars)
 	return res, nil
+}
+
+// feedAutodiscovery coleta <link rel="alternate" type="application/rss+xml|atom+xml">.
+func feedAutodiscovery(base *url.URL, head *html.Node) []string {
+	if head == nil {
+		return nil
+	}
+	var feeds []string
+	for c := head.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode || !strings.EqualFold(c.Data, "link") {
+			continue
+		}
+		typ := strings.ToLower(attr(c, "type"))
+		if !strings.Contains(strings.ToLower(attr(c, "rel")), "alternate") ||
+			(typ != "application/rss+xml" && typ != "application/atom+xml") {
+			continue
+		}
+		if u, ok := resolveLink(base, attr(c, "href")); ok {
+			feeds = append(feeds, u)
+		}
+	}
+	return feeds
 }
 
 var urlRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-\._~:/\?#\[\]@!$&'\(\)\*\+,;=%]+[a-zA-Z0-9/_]`)

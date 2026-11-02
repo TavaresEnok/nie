@@ -138,19 +138,31 @@ func registerFase2and3(api huma.API, s *Server) {
 		// Enfileira as pistas investigativas adaptativas (AdaptiveInvestigationLeads)
 		// geradas para claims incompletas (contested, documented, unconfirmed) como
 		// tarefas de descoberta de 2ª rodada na fila de jobs persistente PostgreSQL.
+		// Cada pista consome orçamento de jobs (EnqueueDiscovery respeita max_urls e
+		// deduplica por consulta): no máximo um provedor web e um de código por pista.
+		webKind, codeKind := "", ""
+		switch {
+		case s.cfg.SearXNGURL != "":
+			webKind = "discover_web"
+		case s.cfg.MwmblURL != "":
+			webKind = "discover_mwmbl"
+		}
+		switch {
+		case s.cfg.GitHubEnabled:
+			codeKind = "discover_github"
+		case s.cfg.SoftwareHeritageEnabled:
+			codeKind = "discover_swh"
+		}
 		for _, lead := range dossier.InvestigationLeads {
-			if lead.SearchLead != "" {
-				if s.cfg.SearXNGURL != "" {
-					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_web", lead.SearchLead)
+			if lead.SearchLead == "" {
+				continue
+			}
+			for _, kind := range []string{webKind, codeKind} {
+				if kind == "" {
+					continue
 				}
-				if s.cfg.MwmblURL != "" {
-					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_mwmbl", lead.SearchLead)
-				}
-				if s.cfg.GitHubEnabled {
-					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_github", lead.SearchLead)
-				}
-				if s.cfg.SoftwareHeritageEnabled {
-					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_swh", lead.SearchLead)
+				if _, err := s.store.EnqueueDiscovery(ctx, camp.ID, kind, lead.SearchLead); err != nil {
+					s.logger.Warn("enfileirar pista adaptativa", "campaign", camp.ID, "kind", kind, "lead", lead.SearchLead, "err", err)
 				}
 			}
 		}

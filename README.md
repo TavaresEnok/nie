@@ -7,36 +7,47 @@ CLI, configurações, RFCs, datasheets, READMEs e notas de versão.
 Cada resultado de busca aponta para o documento original, o trecho exato, a
 página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 
-> **Status de Auditoria e Conformidade Técnica:**
-> O NIE adota transparência estrita entre o que está implementado, o que foi testado com baterias unitárias/integradas e o que permanece em desenvolvimento para fases futuras.
-> Revisado estaticamente e testado após a Segunda Auditoria Técnica Independente (Nov/2026).
+> **Como ler o status.** *Testado* = coberto por teste automatizado que roda
+> neste repositório (unidade ou integração). *Sem teste* = código existe, mas
+> nenhum teste o exercita. *Não validado E2E* = nenhuma campanha real de ponta a
+> ponta foi registrada. Nenhum item abaixo foi validado em campanha real.
 
-## Matriz de Conformidade e Status dos Requisitos
+## Matriz de status
 
-| Requisito / Componente | Escopo | Status Real | Evidência / Testes |
-|---|---|---|---|
-| **Motor de Evidências Epistemológico** | Validação Técnica Estrita (P0-01) | **Implementado & Testado** | `internal/evidence/engine.go`, `engine_test.go` (critérios booleanos estruturados: `vendor_match`, `model_match`, `firmware_match`, `feature_match`; ausência de firmware gera `indeterminate`, nunca `applicable`) |
-| **Worker Browser / Playwright** | Execução e Renderização JS (P0-02) | **Implementado & Protegido** | `workers/crawl4ai_worker/app.py` (correção do caminho de sucesso, renderização DOM via Playwright e fallback transparente para requests com preservação de `raw_html`) |
-| **Proteção Anti-SSRF e Egress no Browser** | Firewall de Subrecursos (P0-03) | **Implementado & Testado** | `workers/crawl4ai_worker/app.py` (`page.route('**/*')` bloqueia subrecursos, XHR, redirects e metadados cloud 169.254/RFC1918), `workers/test_workers_ssrf.py` |
-| **Avaliador de Benchmarks** | Fixtures Sintéticas vs E2E (P0-04) | **Implementado & Testado** | `internal/benchmark/benchmark_test.go` (`TestEvaluatorSyntheticFixtures` valida cálculo do avaliador sem inflar métricas de busca na internet; testes negativos rejeitam fabricantes divergentes) |
-| **Roteamento Dinâmico Multi-Executor** | Seleção Automática (P1-01) | **Implementado & Testado** | `internal/crawler/router.go` (`SelectExecutor` seleciona Crawl4AI para SPAs/JS, Scrapy para catálogos/manuais estruturados e Native para tráfego padrão) |
-| **Integridade de Conteúdo Original** | Preservação de Bytes CAS (P1-04) | **Implementado & Testado** | `internal/crawler/router.go`, workers Python (retorno de `raw_html` original para cálculo de SHA-256 no CAS, separando-o do texto e markdown derivados) |
-| **Priorização e Descoberta Geral** | Focused Crawling Semântico (P1-05) | **Implementado & Testado** | `internal/worker/worker.go` (score por termos de query da campanha, documentos técnicos e identificadores alfanuméricos/CVEs) |
-| **Origin Clustering Anti-Cópia** | Thread-Safe (P1-06) | **Implementado & Testado** | `internal/evidence/clustering.go` (`sync.RWMutex`, N réplicas em domínios clonados = 1 único cluster de origem) |
-| **Git Eye / Descoberta em Repositórios** | Rastreamento Local e Remoto (P1-07)| **Implementado & Testado** | `internal/discovery/git_local.go` (resolução do SHA-1 real de commit via `git rev-parse HEAD` / `.git/refs/heads/`, pesquisa em `.cfg`, `.rsc`, `.conf`, `.md`) |
-| **Extração de Citações e Links em PDFs** | Descoberta em Manuais (P1-08) | **Implementado & Testado** | `internal/extract/extract.go` (`ExtractURLLinks` extrai citações de URLs e links embutidos em PDFs e textos puros para novas descobertas na fronteira) |
-| **PostgreSQL 18 + SKIP LOCKED** | Fila e Storage Concorrente | **Implementado & Testado** | `internal/store/store.go`, `store_integration_test.go` (advisory lock dedicado em migrações e multi-origem em arestas) |
-| **SearXNG API / Metabusca JSON** | Descoberta Externa Semântica | **Implementado & Configurado** | `config/searxng/settings.yml`, `docker-compose.yml` (formato JSON ativo) |
-| **OCR Avançado (Tesseract / Docling)** | Documentos Escaneados | **Planejado / Próxima Fase**| PDFs textuais suportados nativamente; pipeline OCR para imagens/scans aguarda container dedicado com limite de CPU |
-| **Busca Semântica com Embeddings (pgvector)** | Vetores e Reranker | **Planejado para V3** | Atualmente exact + FTS tsvector + trigramas pg_trgm ativo no PostgreSQL |
+| Componente | Status | Evidência / limitação |
+|---|---|---|
+| **Motor de evidências** (P0-01) | Testado | `internal/evidence/engine_test.go`: aplicabilidade exige `vendor`, `model`, `firmware` e `feature` estruturados; notas de texto não promovem status |
+| **Schema de claims ↔ motor** (P0-02) | Testado com PostgreSQL 16 | Migração `0005`; `TestP002_SaveClaimsWithDocumentedAndApplicableSchema`; a rota `/investigate` falha com 500 se não persistir |
+| **Fila PostgreSQL + `SKIP LOCKED` + lease** | Testado com PostgreSQL 16 | `internal/store/store_integration_test.go` (requer `NIE_TEST_DATABASE_URL`); PostgreSQL 18 não testado |
+| **Integridade do original no CAS** (P1-04) | Testado | Workers guardam a entidade HTTP descomprimida no charset de origem (gzip, ISO-8859-1, `<meta charset>`); DOM renderizado segue como derivado (`RenderedContent`). `workers/test_workers_ssrf.py`, `internal/crawler/router_test.go` |
+| **Limites de bytes por documento** | Testado | Teto por documento (`NIE_MAX_HTML_BYTES`/`NIE_MAX_PDF_BYTES`) repassado aos workers e aplicado ao corpo descomprimido; resposta JSON dos workers limitada |
+| **Worker Scrapy** | Parcial | Usa `HtmlResponse`/`LinkExtractor` do Scrapy para extrair links; a coleta é `requests`, sem o scheduler/`CrawlSpider` do Scrapy |
+| **Worker de navegador** (`crawl4ai_worker`) | Parcial, browser sem teste | Playwright + BeautifulSoup; **a biblioteca Crawl4AI não é usada**. Só o fallback HTTP é testado |
+| **SSRF no fetcher Go** | Testado | `internal/netguard`, conexão ao IP validado e revalidação de redirects |
+| **SSRF nos workers Python** | Parcial | Validação de destino e `page.route` no navegador, testados em unidade; não há isolamento de rede/egress no Compose, então DNS rebinding não está coberto. Chromium roda com `--no-sandbox` |
+| **Limites de recursos dos workers** | Configurado, não validado | `mem_limit`, `cpus`, `pids_limit`, `no-new-privileges` no `docker-compose.yml` |
+| **Roteamento entre executores** (P1-01) | Testado (heurística) | Escolha por padrões de URL (`/app/`, `/docs/`…); não detecta páginas JS por conteúdo |
+| **Sitemap / RSS / Atom** | Testado | `internal/extract/feed.go`: `urlset`, `sitemapindex`, RSS, Atom e `<link rel="alternate">`; arestas `sitemap`/`feed`. Sitemaps do `robots.txt` ainda não são lidos |
+| **Menções sem link** | Testado (unidade) | `internal/extract/mentions.go` gera consultas de descoberta |
+| **Priorização da fronteira** (P1-05) | Sem teste | `computeFrontierPriority` em `internal/worker/worker.go` |
+| **Origin clustering** (P1-06) | Testado (unidade) | Fingerprint de conteúdo; cópias idênticas = 1 origem. `RecordOriginCluster` não é chamado pelo fluxo |
+| **Ciclo adaptativo de pistas** | Parcial | Pistas vão para a fila (com orçamento e dedupe) só quando `POST /api/campaigns/{id}/investigate` é chamado; não há rodada automática |
+| **Git Eye** (P1-07) | Parcial | Busca de repositórios GitHub + READMEs e varredura de Git local com SHA; sem busca por conteúdo remoto, GitLab ou Zoekt |
+| **Links em PDFs** (P1-08) | Testado (unidade) | URLs encontradas no texto; anotações de link embutidas no PDF não são lidas |
+| **Benchmark de 20 perguntas** | Testado com fixtures sintéticas | Mede o avaliador, não a pesquisa real na internet |
+| **SearXNG** | Configurado | `config/searxng/settings.yml` (JSON); resultados reais não testados |
+| **OCR** | Não integrado | `internal/extract/ocr.go` existe, mas o pipeline não o chama |
+| **Busca semântica (pgvector)** | Planejado | Hoje: exata + FTS `tsvector` + `pg_trgm` |
+
+Decisões de arquitetura vigentes: [`docs/DECISOES.md`](docs/DECISOES.md).
 
 ## O que já funciona
 
 - **Campanhas** com pergunta, seeds, orçamento, pausa, retomada e agendamento contínuo.
-- **Descoberta Multi-Executor** por links recursivos, SearXNG (opcional), GitHub e Git local.
-- **Roteador Inteligente** despachando requisições conforme perfil de destino (SPA/JS via Playwright, catálogos via Scrapy, estáticos via Native).
+- **Descoberta** por links recursivos, sitemaps, RSS/Atom, menções sem link, SearXNG (opcional), Mwmbl, GitHub e Git local.
+- **Roteador de executores** por padrão de URL (navegador Playwright para `/app/` e afins, worker Scrapy para `/docs/` e afins, Go nativo no restante).
 - **Grafo Visual de Descoberta** na UI representando as ramificações em árvore e convergência multi-origens.
-- **Crawler seguro** com fila persistente no PostgreSQL 18 (`SKIP LOCKED`), robots.txt e proteção anti-SSRF/DNS rebinding com firewall de subrecursos.
+- **Crawler seguro** com fila persistente no PostgreSQL (`SKIP LOCKED`), robots.txt e proteção anti-SSRF/DNS rebinding no fetcher Go; os workers Python validam destinos, mas dependem de isolamento de rede para DNS rebinding.
 - **Coleta e extração** de HTML, texto e PDFs digitais com extração de citações e hyperlinks embutidos.
 - **Storage content-addressed (CAS)** imutável por SHA-256 do conteúdo bruto original com escrita atômica.
 - **Classificador Telecom Multivendor** (Huawei VRP, MikroTik RouterOS v6/v7, Cisco IOS-XR/XE, Datacom DmOS, ZTE, FiberHome, VSOL, SonicWall, Hillstone).
@@ -44,7 +55,7 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 - **Motor de Evidências Epistemológico** estruturado (`sustained`, `corroborated`, `contested`, `documented`, `unconfirmed`) com verificação atômica de requisitos.
 - **Investigação com IA & Dossiê Técnico** estruturado (matriz de compatibilidade, comandos CLI com proveniência, rollback e checklist).
 - **Busca Híbrida** exata (preserva pontuação de CLI), lexical (`tsvector`), trigramas (`pg_trgm`) e busca em Git local com hash de commit.
-- **Agendamentos e Alertas** de mudança técnica.
+- **Agendamentos** de campanhas (a detecção de mudança em documentos ainda não está ligada ao fluxo).
 - **Painel Svelte moderno** embutido diretamente no binário Go.
 - **Docker Compose** pronto para subir com PostgreSQL 18 e aplicação.
 

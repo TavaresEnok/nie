@@ -67,11 +67,16 @@ escolhe **um único** executor por tarefa (`SelectExecutor`):
 - `scrapy` (`workers/scrapy_worker`, `NIE_SCRAPY_URL`): catálogos e manuais
   (`/docs/`, `/manual/`, `/wiki/`, `/reference/`, `/catalog/`);
 - `crawl4ai` (`workers/crawl4ai_worker`, `NIE_CRAWL4AI_URL`, perfil Compose
-  `advanced`): modo `browser` e SPAs, com Playwright.
+  `advanced`): modo `browser` e SPAs. **Implementado com Playwright +
+  BeautifulSoup; a biblioteca Crawl4AI ainda não é usada** (deep/adaptive
+  crawling pendente). O nome do executor reflete o papel previsto na V2.1.
 
 Os workers são serviços HTTP sem estado; todas as saídas voltam no contrato
-`domain.FetchResult` com `raw_html` original, para que o SHA-256 do CAS
-(ADR-002) seja calculado sobre os bytes coletados e não sobre o texto derivado.  
+`domain.FetchResult`. `RawContent` (de `raw_b64`) é a entidade HTTP
+descomprimida no charset de origem e é o que vai para o CAS (ADR-002);
+`RenderedContent` (DOM pós-JavaScript), texto e Markdown são derivados. O Go
+repassa um teto **por documento** (`NIE_MAX_HTML_BYTES`/`NIE_MAX_PDF_BYTES`,
+nunca o orçamento total da campanha) e limita o JSON devolvido pelo worker.  
 **Consequências:** a validação de egress dos bridges (`validatePublicTarget`)
 resolve DNS no Go, mas a conexão é feita pelo worker; a proteção contra DNS
 rebinding depende dos guardas no próprio worker (`page.route` no Crawl4AI,

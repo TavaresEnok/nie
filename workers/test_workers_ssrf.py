@@ -20,7 +20,108 @@ from workers.scrapy_worker.app import (
     is_public_ip as scrapy_is_public,
     validate_public_target as scrapy_validate,
 )
+import workers.scrapy_worker.app as scrapy_module
 from bs4 import BeautifulSoup
+import base64
+import gzip
+import http.server
+import threading
+
+LATIN1_HTML = '<html><body><p>Café original</p><a href="/docs/next">Próximo</a></body></html>'.encode("iso-8859-1")
+META_HTML = '<html><head><meta charset="iso-8859-1"></head><body><p>Configuração</p></body></html>'.encode("iso-8859-1")
+
+class _FixtureHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/meta":
+            body, ctype = META_HTML, "text/html"
+        elif self.path == "/big":
+            body, ctype = b"<html>" + b"a" * 4096 + b"</html>", "text/html"
+        else:
+            body, ctype = LATIN1_HTML, "text/html; charset=iso-8859-1"
+        gz = "gzip" in self.headers.get("Accept-Encoding", "")
+        data = gzip.compress(body) if gz else body
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+class TestScrapyWorkerRawContentIntegrity(unittest.TestCase):
+    """O original preservado deve ser a entidade descomprimida, no charset de origem."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.HTTPServer(("127.0.0.1", 0), _FixtureHandler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        # O servidor de fixture é local; a política de egress é coberta pelos testes acima.
+        cls._orig_validate = scrapy_module.validate_public_target
+        scrapy_module.validate_public_target = lambda url: None
+
+    @classmethod
+    def tearDownClass(cls):
+        scrapy_module.validate_public_target = cls._orig_validate
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def crawl(self, path, max_bytes=5242880):
+        return scrapy_module.crawl(scrapy_module.CrawlRequest(
+            task_id="t1", url=self.base + path, campaign_id="c1", max_bytes=max_bytes))
+
+    def test_gzip_body_is_decompressed_and_bytes_preserved(self):
+        res = self.crawl("/")
+        self.assertEqual(base64.b64decode(res.raw_b64), LATIN1_HTML)
+        self.assertIn("Café original", res.text)
+        self.assertIn(self.base + "/docs/next", res.extracted_links)
+
+    def test_charset_from_meta_tag(self):
+        res = self.crawl("/meta")
+        self.assertEqual(base64.b64decode(res.raw_b64), META_HTML)
+        self.assertIn("Configuração", res.text)
+
+    def test_max_bytes_applies_to_decompressed_body(self):
+        with self.assertRaises(HTTPException):
+            self.crawl("/big", max_bytes=1024)
+
+class TestCrawl4AIWorkerHTTPFallbackIntegrity(TestScrapyWorkerRawContentIntegrity):
+    """O fallback HTTP do worker de navegador segue as mesmas regras de preservação."""
+
+    @classmethod
+    def setUpClass(cls):
+        import workers.crawl4ai_worker.app as crawl_module
+        cls.crawl_module = crawl_module
+        super().setUpClass()
+        cls._orig_crawl_validate = crawl_module.validate_public_target
+        crawl_module.validate_public_target = lambda url: None
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.crawl_module.validate_public_target = cls._orig_crawl_validate
+        super().tearDownClass()
+
+    def crawl(self, path, max_bytes=5242880):
+        import asyncio
+        m = self.crawl_module
+        return asyncio.run(m.crawl(m.CrawlRequest(
+            task_id="t1", url=self.base + path, campaign_id="c1", mode="http", max_bytes=max_bytes)))
+
+    def test_gzip_body_is_decompressed_and_bytes_preserved(self):
+        res = self.crawl("/")
+        self.assertEqual(base64.b64decode(res.raw_b64), LATIN1_HTML)
+        self.assertIn("Café original", res.markdown)
+        self.assertIn(self.base + "/docs/next", res.extracted_links)
+        self.assertEqual(res.content_type, "text/html; charset=iso-8859-1")
+        self.assertEqual(res.rendered_html, "")
+
+    def test_charset_from_meta_tag(self):
+        res = self.crawl("/meta")
+        self.assertEqual(base64.b64decode(res.raw_b64), META_HTML)
+        self.assertIn("Configuração", res.markdown)
 
 class TestWorkerSecurityAndExtraction(unittest.TestCase):
     def test_ssrf_ip_ranges(self):

@@ -36,6 +36,12 @@ services:
     container_name: nie-scrapy-worker
     ports:
       - "127.0.0.1:8085:8085"
+    # Conteúdo coletado é não confiável: teto de recursos e sem escalada de privilégio.
+    mem_limit: ${NIE_SCRAPY_MEM_LIMIT:-512m}
+    cpus: ${NIE_SCRAPY_CPUS:-1.0}
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   crawl4ai-worker:
@@ -48,6 +54,12 @@ services:
       - all
     ports:
       - "127.0.0.1:8086:8086"
+    mem_limit: ${NIE_CRAWL4AI_MEM_LIMIT:-1536m}
+    cpus: ${NIE_CRAWL4AI_CPUS:-1.5}
+    pids_limit: 512
+    shm_size: 256m
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   app:

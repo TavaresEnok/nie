@@ -1,10 +1,13 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,3 +255,61 @@ func TestP103_P104_Base64ByteIntegrity(t *testing.T) {
 	}
 }
 
+// TestCrawl4AIBridgeSeparatesHTTPOriginalFromRenderedDOM garante que o CAS recebe
+// o corpo HTTP original e que o DOM pós-JavaScript segue apenas como derivado.
+func TestCrawl4AIBridgeSeparatesHTTPOriginalFromRenderedDOM(t *testing.T) {
+	original := []byte("<html><body><div id=app></div></body></html>")
+	rendered := "<html><body><div id=app><h1>display bgp peer</h1></div></body></html>"
+
+	var gotMaxBytes float64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotMaxBytes, _ = body["max_bytes"].(float64)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"effective_url":   "https://example.com/app/",
+			"status_code":     200,
+			"content_type":    "text/html; charset=iso-8859-1",
+			"markdown":        "# display bgp peer",
+			"raw_html":        string(original),
+			"raw_b64":         base64.StdEncoding.EncodeToString(original),
+			"rendered_html":   rendered,
+			"browser_success": true,
+		})
+	}))
+	defer ts.Close()
+
+	bridge := NewCrawl4AIBridge(ts.URL, nil)
+	task := domain.FetchTask{ID: "spa", URL: "https://example.com/app/", Mode: "browser", MaxBytes: 1 << 20}
+	res, err := bridge.Execute(context.Background(), task)
+	if err != nil {
+		t.Fatalf("erro no Crawl4AIBridge: %v", err)
+	}
+	if !bytes.Equal(res.RawContent, original) {
+		t.Errorf("RawContent deve ser o corpo HTTP original, obteve %q", res.RawContent)
+	}
+	if string(res.RenderedContent) != rendered {
+		t.Errorf("RenderedContent deve ser o DOM renderizado, obteve %q", res.RenderedContent)
+	}
+	if res.ContentType != "text/html; charset=iso-8859-1" {
+		t.Errorf("Content-Type deve ser o do documento original, obteve %q", res.ContentType)
+	}
+	if int64(gotMaxBytes) != task.MaxBytes {
+		t.Errorf("max_bytes não repassado ao worker: obteve %v", gotMaxBytes)
+	}
+}
+
+// TestBridgeRejectsOversizedWorkerResponse garante teto de memória na resposta JSON do worker.
+func TestBridgeRejectsOversizedWorkerResponse(t *testing.T) {
+	huge := strings.Repeat("a", 700<<10) // 2 × 700 KiB > limite de 1 MiB + 4 bytes
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status_code": 200, "text": huge, "raw_html": huge})
+	}))
+	defer ts.Close()
+
+	bridge := NewScrapyBridge(ts.URL, nil)
+	task := domain.FetchTask{ID: "big", URL: "https://example.com/docs/big", MaxBytes: 1}
+	if _, err := bridge.Execute(context.Background(), task); err == nil {
+		t.Fatal("resposta do worker acima do limite deveria falhar")
+	}
+}

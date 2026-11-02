@@ -30,7 +30,7 @@ except ImportError:
 
 from pydantic import BaseModel
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, UnicodeDammit
 
 SCRAPY_AVAILABLE = False
 try:
@@ -121,6 +121,34 @@ def validate_public_target(url: str):
         except socket.gaierror as e:
             raise HTTPException(status_code=400, detail=f"Erro de resolução DNS: {e}")
 
+def read_limited_body(resp, max_bytes: int) -> bytes:
+    """Lê o corpo da entidade já sem Content-Encoding (gzip/deflate), com teto de bytes.
+
+    O teto vale para os bytes descomprimidos, o que também limita bombas de compressão.
+    """
+    buf = bytearray()
+    for chunk in resp.iter_content(chunk_size=65536):
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(status_code=413, detail="Tamanho de conteúdo excedeu max_bytes")
+    return bytes(buf)
+
+_CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?([\w.:-]+)", re.IGNORECASE)
+
+def decode_html(body: bytes, content_type: str):
+    """Decodifica o HTML respeitando charset do cabeçalho, BOM e <meta charset>.
+
+    Retorna (texto, encoding). Os bytes originais não são alterados.
+    """
+    known = []
+    m = _CHARSET_RE.search(content_type or "")
+    if m:
+        known.append(m.group(1))
+    dammit = UnicodeDammit(body, known_definite_encodings=known, is_html=True)
+    if dammit.unicode_markup is None:
+        return body.decode("utf-8", errors="replace"), "utf-8"
+    return dammit.unicode_markup, dammit.original_encoding or "utf-8"
+
 @app.get("/health")
 def health():
     return {
@@ -161,17 +189,17 @@ def crawl(req: CrawlRequest):
         raise HTTPException(status_code=502, detail="Nenhuma resposta recebida do destino")
 
     content_type = resp.headers.get("Content-Type", "text/html")
-    raw_bytes = resp.raw.read(req.max_bytes + 1)
-    if len(raw_bytes) > req.max_bytes:
-        raise HTTPException(status_code=413, detail="Tamanho de conteúdo excedeu max_bytes")
+    # resp.raw.read() devolveria o corpo ainda comprimido (Content-Encoding);
+    # o original preservado é a entidade descomprimida, no charset de origem.
+    raw_bytes = read_limited_body(resp, req.max_bytes)
 
     raw_b64 = base64.b64encode(raw_bytes).decode("ascii")
-    raw_html_str = raw_bytes.decode("utf-8", errors="replace")
+    raw_html_str, encoding = decode_html(raw_bytes, content_type)
 
     links = []
     if SCRAPY_AVAILABLE:
         # Utiliza Scrapy HtmlResponse e Scrapy LinkExtractor nativo
-        scrapy_resp = HtmlResponse(url=curr_url, body=raw_bytes, encoding="utf-8")
+        scrapy_resp = HtmlResponse(url=curr_url, body=raw_bytes, encoding=encoding)
         extractor = LinkExtractor(
             deny_extensions=['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'zip', 'tar', 'gz', 'exe', 'bin', 'mp4'],
             tags=('a', 'area'),

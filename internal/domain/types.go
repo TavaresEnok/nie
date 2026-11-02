@@ -146,13 +146,13 @@ type Stats struct {
 }
 
 type Dossier struct {
-	Campaign       Campaign        `json:"campaign"`
-	DocumentsCount int             `json:"documents_count"`
-	PassagesCount  int             `json:"passages_count"`
-	DomainsCount   int             `json:"domains_count"`
-	BytesTotal     int64           `json:"bytes_total"`
-	Markdown       string          `json:"markdown"`
-	GeneratedAt    time.Time       `json:"generated_at"`
+	Campaign       Campaign  `json:"campaign"`
+	DocumentsCount int       `json:"documents_count"`
+	PassagesCount  int       `json:"passages_count"`
+	DomainsCount   int       `json:"domains_count"`
+	BytesTotal     int64     `json:"bytes_total"`
+	Markdown       string    `json:"markdown"`
+	GeneratedAt    time.Time `json:"generated_at"`
 }
 
 // Fase 2: Fabricantes, Modelos e Firmware
@@ -236,8 +236,8 @@ type Claim struct {
 	VendorName            string          `json:"vendor_name,omitempty"`
 	ModelID               *string         `json:"model_id,omitempty"`
 	FirmwareID            *string         `json:"firmware_id,omitempty"`
-	Status                string          `json:"status"` // unconfirmed, sustained, corroborated, contested, validated_lab
-	Applicability         string          `json:"applicability"` // confirmed, incompatible, indeterminate
+	Status                string          `json:"status"`                 // unconfirmed, sustained, corroborated, contested, validated_lab
+	Applicability         string          `json:"applicability"`          // confirmed, incompatible, indeterminate
 	OperationalValidation string          `json:"operational_validation"` // untested, lab_validated, failed
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
@@ -356,11 +356,14 @@ type FetchTask struct {
 }
 
 type FetchResult struct {
-	TaskID            string         `json:"task_id"`
-	EffectiveURL      string         `json:"effective_url"`
-	StatusCode        int            `json:"status_code"`
-	ContentType       string         `json:"content_type"`
-	RawContent        []byte         `json:"-"`
+	TaskID       string `json:"task_id"`
+	EffectiveURL string `json:"effective_url"`
+	StatusCode   int    `json:"status_code"`
+	ContentType  string `json:"content_type"`
+	RawContent   []byte `json:"-"`
+	// RenderedContent é o DOM pós-JavaScript (derivado). Quando presente, a
+	// extração usa este conteúdo; o acervo CAS sempre guarda RawContent.
+	RenderedContent   []byte         `json:"-"`
 	Text              string         `json:"text"`
 	Title             string         `json:"title,omitempty"`
 	ETag              string         `json:"etag,omitempty"`
@@ -371,4 +374,3 @@ type FetchResult struct {
 	Error             string         `json:"error,omitempty"`
 	Metadata          map[string]any `json:"metadata,omitempty"`
 }
-

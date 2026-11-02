@@ -136,3 +136,12 @@ func TestExtractURLLinks(t *testing.T) {
 		t.Errorf("Link 2 incorreto: %s", links[1])
 	}
 }
+
+func TestOCRArgsWriteToStdout(t *testing.T) {
+	if got := strings.Join(ocrArgs("pdftotext", "in.pdf"), " "); got != "-layout in.pdf -" {
+		t.Errorf("pdftotext deve escrever em stdout com '-', obteve %q", got)
+	}
+	if got := strings.Join(ocrArgs("tesseract", "scan.png"), " "); got != "scan.png stdout" {
+		t.Errorf("tesseract deve usar 'stdout', obteve %q", got)
+	}
+}

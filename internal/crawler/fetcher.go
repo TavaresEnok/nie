@@ -123,7 +123,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", f.userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown;q=0.9,*/*;q=0.1")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown;q=0.9,application/xml,text/xml,application/rss+xml,application/atom+xml;q=0.8,*/*;q=0.1")
 	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8")
 	req.Header.Set("From", "nie@localhost")
 
@@ -204,7 +204,12 @@ func isHTMLType(t string) bool {
 }
 
 func isTextType(t string) bool {
-	return t == "text/plain" || t == "text/markdown" || t == "text/x-markdown"
+	return t == "text/plain" || t == "text/markdown" || t == "text/x-markdown" || isFeedType(t)
+}
+
+// isFeedType cobre sitemaps e feeds RSS/Atom (descoberta de URLs).
+func isFeedType(t string) bool {
+	return t == "application/xml" || t == "text/xml" || t == "application/rss+xml" || t == "application/atom+xml"
 }
 
 func supportedType(t string) bool {

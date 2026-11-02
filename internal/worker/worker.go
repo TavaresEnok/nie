@@ -265,7 +265,17 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		executor = "scrapy"
 	}
 
-	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, budget.MaxBytes)
+	// Teto por documento: o orçamento da campanha (budget.MaxBytes) é um total,
+	// não um limite de recurso individual.
+	perDocument := w.cfg.MaxHTMLBytes
+	if strings.HasSuffix(strings.ToLower(u.Path), ".pdf") {
+		perDocument = w.cfg.MaxPDFBytes
+	}
+	if budget.MaxBytes > 0 && budget.MaxBytes < perDocument {
+		perDocument = budget.MaxBytes
+	}
+
+	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, perDocument)
 	fetchResult, err := w.router.Execute(ctx, task)
 	if err != nil {
 		return classifyFetchError(err)
@@ -321,10 +331,24 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		if mimeStr, ok := fetchResult.Metadata["mime"].(string); ok {
 			ex.MIME = mimeStr
 		}
+		if kind, ok := fetchResult.Metadata["link_kind"].(string); ok {
+			ex.LinkKind = kind
+		}
+		if feeds, ok := fetchResult.Metadata["feed_links"].([]string); ok {
+			ex.FeedLinks = feeds
+		}
 	} else {
 		switch {
 		case strings.HasPrefix(fetchResult.ContentType, "application/pdf"):
 			ex, err = extract.PDF(rawBytes)
+		case extract.IsFeedCandidate(fetchResult.ContentType, finalURL.Path):
+			// Sitemap/RSS/Atom; XML de outro formato cai na extração de texto.
+			if ex, err = extract.Feed(finalURL, rawBytes); err != nil {
+				ex, err = extract.Text(rawBytes)
+			}
+		case len(fetchResult.RenderedContent) > 0:
+			// DOM renderizado já vem em UTF-8 do navegador; o original HTTP vai para o CAS.
+			ex, err = extract.HTML(finalURL, "text/html; charset=utf-8", fetchResult.RenderedContent)
 		case strings.HasPrefix(fetchResult.ContentType, "text/html") || strings.HasPrefix(fetchResult.ContentType, "application/xhtml+xml"):
 			ex, err = extract.HTML(finalURL, fetchResult.ContentType, rawBytes)
 		default:
@@ -352,12 +376,19 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		passages = append(passages, domain.Passage{Ordinal: p.Ordinal, Page: p.Page, Text: p.Text})
 	}
 	docID, created, err := w.store.RecordDocument(ctx, store.DocumentRecord{
-		SHA256:        stored.SHA256,
-		MIME:          ex.MIME,
-		Title:         ex.Title,
-		Size:          stored.Size,
-		Text:          ex.Text,
-		Metadata:      map[string]any{"requested_url": norm, "final_url": finalNorm, "passages": len(passages), "executor": fetchResult.Metadata["executor"]},
+		SHA256: stored.SHA256,
+		MIME:   ex.MIME,
+		Title:  ex.Title,
+		Size:   stored.Size,
+		Text:   ex.Text,
+		Metadata: map[string]any{
+			"requested_url":   norm,
+			"final_url":       finalNorm,
+			"passages":        len(passages),
+			"executor":        fetchResult.Metadata["executor"],
+			"rendered":        len(fetchResult.RenderedContent) > 0,
+			"fallback_reason": fetchResult.Metadata["fallback_reason"],
+		},
 		CampaignID:    job.CampaignID,
 		URL:           finalNorm,
 		NormalizedURL: finalNorm,
@@ -378,20 +409,28 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		if len(linksToFollow) == 0 {
 			linksToFollow = fetchResult.ExtractedLinks
 		}
-		for _, link := range linksToFollow {
-			if !crawlableLink(link) {
-				continue
-			}
-			prio := computeFrontierPriority(link, job.Depth+1, campaignQuery)
-			ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, link, job.Depth+1, finalNorm, "link", prio)
-			if err != nil {
-				w.logger.Warn("enfileirar link", "url", link, "err", err)
-				continue
-			}
-			if ok {
-				enqueued++
+		linkKind := "link"
+		if ex.LinkKind != "" {
+			linkKind = ex.LinkKind
+		}
+		enqueueLinks := func(links []string, kind string) {
+			for _, link := range links {
+				if !crawlableLink(link) {
+					continue
+				}
+				prio := computeFrontierPriority(link, job.Depth+1, campaignQuery)
+				ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, link, job.Depth+1, finalNorm, kind, prio)
+				if err != nil {
+					w.logger.Warn("enfileirar link", "url", link, "err", err)
+					continue
+				}
+				if ok {
+					enqueued++
+				}
 			}
 		}
+		enqueueLinks(linksToFollow, linkKind)
+		enqueueLinks(ex.FeedLinks, extract.LinkKindFeed)
 		if enqueued > 0 {
 			w.logger.Info("novas pistas", "from", finalNorm, "count", enqueued)
 		}
@@ -676,4 +715,3 @@ func isTechnicalTelecomKeyword(m string) bool {
 	}
 	return false
 }
-

@@ -91,6 +91,11 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 		ex, _ = extract.PDF(resp.Body)
 	case strings.HasPrefix(resp.ContentType, "text/html") || strings.HasPrefix(resp.ContentType, "application/xhtml+xml"):
 		ex, _ = extract.HTML(finalURL, resp.ContentType, resp.Body)
+	case extract.IsFeedCandidate(resp.ContentType, finalURL.Path):
+		var err error
+		if ex, err = extract.Feed(finalURL, resp.Body); err != nil {
+			ex, _ = extract.Text(resp.Body)
+		}
 	default:
 		ex, _ = extract.Text(resp.Body)
 	}
@@ -116,6 +121,8 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 			"title":      ex.Title,
 			"mime":       ex.MIME,
 			"passages":   ex.Passages,
+			"link_kind":  ex.LinkKind,
+			"feed_links": ex.FeedLinks,
 		},
 	}, nil
 }
@@ -193,7 +200,7 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 		ExtractedLinks []string `json:"extracted_links"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, bridgeResponseLimit(task.MaxBytes))).Decode(&res); err != nil {
 		return nil, err
 	}
 
@@ -261,6 +268,7 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		"url":         task.URL,
 		"campaign_id": task.CampaignID,
 		"mode":        task.Mode,
+		"max_bytes":   task.MaxBytes,
 	})
 	if err != nil {
 		return nil, err
@@ -299,13 +307,14 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		Markdown       string   `json:"markdown"`
 		RawHTML        string   `json:"raw_html"`
 		RawB64         string   `json:"raw_b64"`
+		RenderedHTML   string   `json:"rendered_html"`
 		ExtractedLinks []string `json:"extracted_links"`
 		BrowserSuccess bool     `json:"browser_success"`
 		BrowserError   string   `json:"browser_error"`
 		FallbackReason string   `json:"fallback_reason"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, bridgeResponseLimit(task.MaxBytes))).Decode(&res); err != nil {
 		return nil, err
 	}
 
@@ -330,6 +339,7 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		StatusCode:        res.StatusCode,
 		ContentType:       res.ContentType,
 		RawContent:        rawBytes,
+		RenderedContent:   []byte(res.RenderedHTML),
 		Text:              res.Markdown,
 		ExtractedLinks:    res.ExtractedLinks,
 		ExtractedMentions: mentions,
@@ -342,6 +352,15 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 			"fallback_reason": res.FallbackReason,
 		},
 	}, nil
+}
+
+// bridgeResponseLimit limita o JSON devolvido pelos workers: o corpo em base64
+// (4/3 do original) mais as versões derivadas (texto, HTML renderizado, Markdown).
+func bridgeResponseLimit(maxBytes int64) int64 {
+	if maxBytes <= 0 {
+		maxBytes = 5 << 20
+	}
+	return maxBytes*4 + 1<<20
 }
 
 // Router gerencia e seleciona o executor adequado para cada tarefa.

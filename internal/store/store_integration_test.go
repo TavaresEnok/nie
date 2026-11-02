@@ -341,6 +341,7 @@ func TestP103_MultipleOriginsPreserveEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupCampaign(t, st, camp.ID)
 
 	urlA := "https://page-a.example/guide"
 	urlB := "https://page-b.example/forum"
@@ -456,6 +457,7 @@ func TestP002_SaveClaimsWithDocumentedAndApplicableSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCampaign falhou: %v", err)
 	}
+	cleanupCampaign(t, st, camp.ID)
 
 	// Criar um documento para vincular a evidência
 	docID, _, err := st.RecordDocument(ctx, DocumentRecord{
@@ -535,4 +537,13 @@ func TestP002_SaveClaimsWithDocumentedAndApplicableSchema(t *testing.T) {
 	}
 }
 
-
+// cleanupCampaign remove a campanha (e, em cascata, jobs e arestas) ao fim do
+// teste, para que ClaimJob em outros testes não pegue jobs remanescentes.
+func cleanupCampaign(t *testing.T, st *Store, id string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = st.Pool().Exec(ctx, `DELETE FROM campaigns WHERE id=$1::uuid`, id)
+	})
+}
