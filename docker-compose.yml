@@ -7,17 +7,45 @@ services:
       POSTGRES_USER: nie
       POSTGRES_PASSWORD: ${NIE_DB_PASSWORD:-nie}
       POSTGRES_DB: nie
-    # Exposto apenas no loopback para inspeção local; remova se não precisar.
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      # PostgreSQL 18+ usa /var/lib/postgresql como mount único.
       - nie_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nie -d nie"]
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: nie-searxng
+    ports:
+      - "127.0.0.1:8082:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8082/
+    restart: unless-stopped
+
+  scrapy-worker:
+    build:
+      context: ./workers/scrapy_worker
+      dockerfile: Dockerfile
+    container_name: nie-scrapy-worker
+    ports:
+      - "127.0.0.1:8085:8085"
+    restart: unless-stopped
+
+  crawl4ai-worker:
+    build:
+      context: ./workers/crawl4ai_worker
+      dockerfile: Dockerfile
+    container_name: nie-crawl4ai-worker
+    profiles:
+      - advanced
+      - all
+    ports:
+      - "127.0.0.1:8086:8086"
     restart: unless-stopped
 
   app:
@@ -27,6 +55,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      scrapy-worker:
+        condition: service_started
     environment:
       NIE_DATABASE_URL: postgres://nie:${NIE_DB_PASSWORD:-nie}@postgres:5432/nie?sslmode=disable
       NIE_ADDR: 0.0.0.0:8080
@@ -35,7 +65,13 @@ services:
       NIE_WORKERS: ${NIE_WORKERS:-2}
       NIE_POLL_INTERVAL: ${NIE_POLL_INTERVAL:-2s}
       NIE_REQUEST_TIMEOUT: ${NIE_REQUEST_TIMEOUT:-30s}
-      NIE_SEARXNG_URL: ${NIE_SEARXNG_URL:-}
+      NIE_SEARXNG_URL: ${NIE_SEARXNG_URL:-http://searxng:8080}
+      NIE_SCRAPY_URL: ${NIE_SCRAPY_URL:-http://scrapy-worker:8085}
+      NIE_CRAWL4AI_URL: ${NIE_CRAWL4AI_URL:-http://crawl4ai-worker:8086}
+      NIE_MWMBL_URL: ${NIE_MWMBL_URL:-https://mwmbl.org}
+      NIE_WAYBACK_ENABLED: "true"
+      NIE_SOFTWARE_HERITAGE_ENABLED: "true"
+      NIE_MENTIONS_DISCOVERY_ENABLED: "true"
       NIE_GITHUB_ENABLED: ${NIE_GITHUB_ENABLED:-false}
       NIE_GITHUB_TOKEN: ${NIE_GITHUB_TOKEN:-}
       NIE_API_TOKEN: ${NIE_API_TOKEN:-}
