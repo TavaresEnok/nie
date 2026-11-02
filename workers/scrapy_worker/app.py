@@ -1,3 +1,4 @@
+import base64
 import ipaddress
 import os
 import re
@@ -55,6 +56,7 @@ class CrawlResponse(BaseModel):
     content_type: str
     text: str
     raw_html: str
+    raw_b64: Optional[str] = None
     extracted_links: List[str]
 
 BLOCKED_HOSTNAMES = {
@@ -163,6 +165,7 @@ def crawl(req: CrawlRequest):
     if len(raw_bytes) > req.max_bytes:
         raise HTTPException(status_code=413, detail="Tamanho de conteúdo excedeu max_bytes")
 
+    raw_b64 = base64.b64encode(raw_bytes).decode("ascii")
     raw_html_str = raw_bytes.decode("utf-8", errors="replace")
 
     links = []
@@ -206,6 +209,7 @@ def crawl(req: CrawlRequest):
         content_type=content_type,
         text=text,
         raw_html=raw_html_str,
+        raw_b64=raw_b64,
         extracted_links=deduped_links[:200],
     )
 

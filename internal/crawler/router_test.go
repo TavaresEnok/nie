@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -212,3 +213,42 @@ func TestRawContentPreservationSeparatedFromDerived(t *testing.T) {
 		t.Errorf("P1-04: Text derivado incorreto: obteve %q", res.Text)
 	}
 }
+
+// TestP103_P104_Base64ByteIntegrity valida a preservação fiel de bytes brutos (ex: ISO-8859-1 "Café")
+// transmitidos via raw_b64 sem perda por decodificação UTF-8 com replacement character.
+func TestP103_P104_Base64ByteIntegrity(t *testing.T) {
+	// "Café" em ISO-8859-1: 'C', 'a', 'f', 0xE9
+	isoBytes := []byte{0x43, 0x61, 0x66, 0xe9}
+	b64Data := base64.StdEncoding.EncodeToString(isoBytes)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"effective_url": "https://example.com/legacy-iso",
+			"status_code": 200,
+			"content_type": "text/html; charset=iso-8859-1",
+			"text": "Café",
+			"raw_html": "Caf?",
+			"raw_b64": "` + b64Data + `",
+			"extracted_links": []
+		}`))
+	}))
+	defer ts.Close()
+
+	bridge := NewScrapyBridge(ts.URL, nil)
+	task := domain.FetchTask{ID: "iso-test", URL: "https://example.com/legacy-iso"}
+	res, err := bridge.Execute(context.Background(), task)
+	if err != nil {
+		t.Fatalf("erro no ScrapyBridge: %v", err)
+	}
+
+	if len(res.RawContent) != len(isoBytes) {
+		t.Fatalf("esperava %d bytes brutos preservados, obteve %d bytes: %v", len(isoBytes), len(res.RawContent), res.RawContent)
+	}
+	for i := range isoBytes {
+		if res.RawContent[i] != isoBytes[i] {
+			t.Fatalf("byte na posição %d diverge: esperado 0x%x, obtido 0x%x", i, isoBytes[i], res.RawContent[i])
+		}
+	}
+}
+

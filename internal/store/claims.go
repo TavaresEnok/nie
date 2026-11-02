@@ -48,9 +48,13 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 
 		for _, ev := range c.Evidences {
 			_, err = tx.Exec(ctx, `
-				INSERT INTO evidence (claim_id, document_id, passage_id, stance, excerpt, page, confidence, is_official_doc, notes)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-				claimID, ev.DocumentID, ev.PassageID, ev.Stance, ev.Excerpt, ev.Page, ev.Confidence, ev.IsOfficialDoc, ev.Notes)
+				INSERT INTO evidence (
+					claim_id, document_id, passage_id, stance, excerpt, page, confidence, is_official_doc, notes,
+					vendor_match, model_match, firmware_match, feature_match, mode_match, prerequisites_match, source_span, validation_run_id
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+				claimID, ev.DocumentID, ev.PassageID, ev.Stance, ev.Excerpt, ev.Page, ev.Confidence, ev.IsOfficialDoc, ev.Notes,
+				ev.VendorMatch, ev.ModelMatch, ev.FirmwareMatch, ev.FeatureMatch, ev.ModeMatch, ev.PrerequisitesMatch, ev.SourceSpan, ev.ValidationRunID)
 			if err != nil {
 				return fmt.Errorf("inserir evidence: %w", err)
 			}
@@ -100,7 +104,9 @@ func (s *Store) ListClaimsByCampaign(ctx context.Context, campaignID string) ([]
 func (s *Store) listEvidenceByClaim(ctx context.Context, claimID string) ([]domain.Evidence, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, claim_id::text, document_id::text, passage_id, cluster_id::text,
-		       stance, excerpt, page, confidence, is_official_doc, notes, created_at
+		       stance, excerpt, page, confidence, is_official_doc, notes,
+		       vendor_match, model_match, firmware_match, feature_match, mode_match, prerequisites_match,
+		       COALESCE(source_span, ''), validation_run_id, created_at
 		FROM evidence
 		WHERE claim_id = $1
 		ORDER BY created_at ASC`, claimID)
@@ -114,8 +120,11 @@ func (s *Store) listEvidenceByClaim(ctx context.Context, claimID string) ([]doma
 		var ev domain.Evidence
 		var pID *int64
 		var cID *string
-		if err := rows.Scan(&ev.ID, &ev.ClaimID, &ev.DocumentID, &pID, &cID,
-			&ev.Stance, &ev.Excerpt, &ev.Page, &ev.Confidence, &ev.IsOfficialDoc, &ev.Notes, &ev.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&ev.ID, &ev.ClaimID, &ev.DocumentID, &pID, &cID,
+			&ev.Stance, &ev.Excerpt, &ev.Page, &ev.Confidence, &ev.IsOfficialDoc, &ev.Notes,
+			&ev.VendorMatch, &ev.ModelMatch, &ev.FirmwareMatch, &ev.FeatureMatch, &ev.ModeMatch, &ev.PrerequisitesMatch,
+			&ev.SourceSpan, &ev.ValidationRunID, &ev.CreatedAt); err != nil {
 			return nil, err
 		}
 		ev.PassageID = pID

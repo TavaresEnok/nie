@@ -125,10 +125,35 @@ func registerFase2and3(api huma.API, s *Server) {
 
 		// Construir claims e origin clusters
 		claims := s.evidenceEng.BuildClaimsFromPassages(camp.ID, camp.Query, passages)
-		_ = s.store.SaveClaims(ctx, claims)
+		if len(claims) > 0 {
+			if err := s.store.SaveClaims(ctx, claims); err != nil {
+				return nil, huma.Error500InternalServerError("erro ao persistir claims e evidências: " + err.Error())
+			}
+		}
 
 		// Gerar Dossiê de Investigação
 		dossier := s.aiSvc.GenerateInvestigationDossier(ctx, camp, claims, passages)
+
+		// P1-06: Fechamento do ciclo autônomo recursivo de investigação.
+		// Enfileira as pistas investigativas adaptativas (AdaptiveInvestigationLeads)
+		// geradas para claims incompletas (contested, documented, unconfirmed) como
+		// tarefas de descoberta de 2ª rodada na fila de jobs persistente PostgreSQL.
+		for _, lead := range dossier.InvestigationLeads {
+			if lead.SearchLead != "" {
+				if s.cfg.SearXNGURL != "" {
+					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_web", lead.SearchLead)
+				}
+				if s.cfg.MwmblURL != "" {
+					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_mwmbl", lead.SearchLead)
+				}
+				if s.cfg.GitHubEnabled {
+					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_github", lead.SearchLead)
+				}
+				if s.cfg.SoftwareHeritageEnabled {
+					_, _ = s.store.EnqueueDiscovery(ctx, camp.ID, "discover_swh", lead.SearchLead)
+				}
+			}
+		}
 
 		res := &deepDossierOut{Body: dossier}
 		return res, nil

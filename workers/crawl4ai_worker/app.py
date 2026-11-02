@@ -1,3 +1,4 @@
+import base64
 import ipaddress
 import os
 import re
@@ -43,9 +44,10 @@ class CrawlResponse(BaseModel):
     task_id: str
     effective_url: str
     status_code: int
-    content_type: str = "text/markdown"
+    content_type: str = "text/html; charset=utf-8"
     markdown: str
     raw_html: str
+    raw_b64: Optional[str] = None
     extracted_links: List[str]
     browser_success: bool = False
     browser_error: str = ""
@@ -259,13 +261,16 @@ async def crawl(req: CrawlRequest):
             seen.add(l)
             deduped_links.append(l)
 
+    raw_b64 = base64.b64encode(html_content.encode("utf-8")).decode("ascii")
+
     return CrawlResponse(
         task_id=req.task_id,
         effective_url=effective_url,
         status_code=status_code,
-        content_type="text/markdown",
+        content_type="text/html; charset=utf-8",
         markdown=markdown,
         raw_html=html_content,
+        raw_b64=raw_b64,
         extracted_links=deduped_links[:200],
         browser_success=browser_success,
         browser_error=browser_error,

@@ -3,6 +3,7 @@ package crawler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +189,7 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 		ContentType    string   `json:"content_type"`
 		Text           string   `json:"text"`
 		RawHTML        string   `json:"raw_html"`
+		RawB64         string   `json:"raw_b64"`
 		ExtractedLinks []string `json:"extracted_links"`
 	}
 
@@ -197,7 +199,15 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 
 	mentions := extract.ExtractMentions(res.Text, 25)
 
-	rawBytes := []byte(res.RawHTML)
+	var rawBytes []byte
+	if res.RawB64 != "" {
+		if b, err := base64.StdEncoding.DecodeString(res.RawB64); err == nil {
+			rawBytes = b
+		}
+	}
+	if len(rawBytes) == 0 {
+		rawBytes = []byte(res.RawHTML)
+	}
 	if len(rawBytes) == 0 {
 		rawBytes = []byte(res.Text)
 	}
@@ -288,6 +298,7 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		ContentType    string   `json:"content_type"`
 		Markdown       string   `json:"markdown"`
 		RawHTML        string   `json:"raw_html"`
+		RawB64         string   `json:"raw_b64"`
 		ExtractedLinks []string `json:"extracted_links"`
 		BrowserSuccess bool     `json:"browser_success"`
 		BrowserError   string   `json:"browser_error"`
@@ -300,7 +311,15 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 
 	mentions := extract.ExtractMentions(res.Markdown, 25)
 
-	rawBytes := []byte(res.RawHTML)
+	var rawBytes []byte
+	if res.RawB64 != "" {
+		if b, err := base64.StdEncoding.DecodeString(res.RawB64); err == nil {
+			rawBytes = b
+		}
+	}
+	if len(rawBytes) == 0 {
+		rawBytes = []byte(res.RawHTML)
+	}
 	if len(rawBytes) == 0 {
 		rawBytes = []byte(res.Markdown)
 	}

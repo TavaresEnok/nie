@@ -425,3 +425,114 @@ func TestP102_ConcurrentMigrations(t *testing.T) {
 	}
 }
 
+// TestP002_SaveClaimsWithDocumentedAndApplicableSchema valida que o schema Postgres
+// suporta status 'documented', aplicabilidade 'applicable' e colunas estruturadas de evidência.
+func TestP002_SaveClaimsWithDocumentedAndApplicableSchema(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("NIE_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("NIE_TEST_DATABASE_URL não definido")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	st, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate falhou ao aplicar migrações incluindo 0005: %v", err)
+	}
+
+	budget := domain.Budget{
+		MaxDepth:                 1,
+		MaxURLs:                  10,
+		MaxDomains:               2,
+		MaxBytes:                 10 << 20,
+		MinDomainIntervalSeconds: 1,
+	}
+	camp, err := st.CreateCampaign(ctx, "Audit Schema Test", []string{"https://example.com/test"}, budget)
+	if err != nil {
+		t.Fatalf("CreateCampaign falhou: %v", err)
+	}
+
+	// Criar um documento para vincular a evidência
+	docID, _, err := st.RecordDocument(ctx, DocumentRecord{
+		SHA256:        hashFor("schema-test-" + fmt.Sprintf("%d", time.Now().UnixNano())),
+		MIME:          "text/html",
+		Title:         "Test Doc",
+		Size:          100,
+		Text:          "bgp 65000",
+		Metadata:      map[string]any{"source": "test"},
+		CampaignID:    camp.ID,
+		URL:           "https://example.com/test",
+		NormalizedURL: "https://example.com/test",
+		Domain:        "example.com",
+		StatusCode:    200,
+		Passages: []domain.Passage{
+			{Ordinal: 0, Text: "bgp 65000"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RecordDocument falhou: %v", err)
+	}
+
+	claim := domain.Claim{
+		CampaignID:            camp.ID,
+		Title:                 "Huawei NE8000 CLI Specification",
+		Statement:             "Procedimento CLI para BGP e Interfaces",
+		Status:                "documented",
+		Applicability:         "applicable",
+		OperationalValidation: "untested",
+		Evidences: []domain.Evidence{
+			{
+				DocumentID:         docID,
+				Stance:             "supports",
+				Excerpt:            "bgp 65000",
+				Confidence:         0.95,
+				IsOfficialDoc:      true,
+				Notes:              "Fonte: support.huawei.com",
+				VendorMatch:        true,
+				ModelMatch:         true,
+				FirmwareMatch:      true,
+				FeatureMatch:       true,
+				ModeMatch:          true,
+				PrerequisitesMatch: true,
+				SourceSpan:         "doc:1:p:1",
+			},
+		},
+	}
+
+	if err := st.SaveClaims(ctx, []domain.Claim{claim}); err != nil {
+		t.Fatalf("SaveClaims falhou com violação de schema P0-02: %v", err)
+	}
+
+	retrieved, err := st.ListClaimsByCampaign(ctx, camp.ID)
+	if err != nil {
+		t.Fatalf("ListClaimsByCampaign falhou: %v", err)
+	}
+	if len(retrieved) == 0 {
+		t.Fatalf("Nenhuma claim recuperada")
+	}
+
+	c := retrieved[0]
+	if c.Status != "documented" {
+		t.Errorf("Esperava status 'documented', obteve %s", c.Status)
+	}
+	if c.Applicability != "applicable" {
+		t.Errorf("Esperava applicability 'applicable', obteve %s", c.Applicability)
+	}
+	if len(c.Evidences) == 0 {
+		t.Fatalf("Nenhuma evidência recuperada")
+	}
+	ev := c.Evidences[0]
+	if !ev.VendorMatch || !ev.ModelMatch || !ev.FirmwareMatch || !ev.FeatureMatch || !ev.ModeMatch || !ev.PrerequisitesMatch {
+		t.Errorf("Campos booleanos estruturados de evidência não foram preservados: %+v", ev)
+	}
+	if ev.SourceSpan != "doc:1:p:1" {
+		t.Errorf("SourceSpan não preservado, obteve %s", ev.SourceSpan)
+	}
+}
+
+

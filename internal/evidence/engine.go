@@ -170,16 +170,11 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 		domains = append(domains, dom)
 
 		// P0-01: Verificação técnica estrita baseada exclusivamente em campos estruturados
+		// Requer rigorosamente todos os campos de match estruturados (Vendor, Model, Firmware, Feature).
+		// Notas textuais jamais substituem a ausência de campos estruturados válidos.
 		if ev.Stance == "supports" {
-			// Se o claim tiver campos estruturados definidos na evidência:
-			if ev.VendorMatch && ev.FirmwareMatch && ev.FeatureMatch {
+			if ev.VendorMatch && ev.ModelMatch && ev.FirmwareMatch && ev.FeatureMatch {
 				strictlyVerified = true
-			}
-			// Suporte retrocompatível para evidências de teste onde campos são passados via notes
-			if !ev.VendorMatch && !ev.FirmwareMatch && !ev.FeatureMatch {
-				if strings.Contains(ev.Notes, "firmware verificado") && strings.Contains(ev.Notes, "modelo correspondente") {
-					strictlyVerified = true
-				}
 			}
 		}
 	}

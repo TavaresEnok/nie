@@ -104,6 +104,7 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 			Stance:        "supports",
 			ClusterID:     &clusterA,
 			VendorMatch:   true,
+			ModelMatch:    true,
 			FirmwareMatch: true,
 			FeatureMatch:  true,
 			Notes:         "Fonte: netops.org",
@@ -113,6 +114,7 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 			Stance:        "supports",
 			ClusterID:     &clusterB,
 			VendorMatch:   true,
+			ModelMatch:    true,
 			FirmwareMatch: true,
 			FeatureMatch:  true,
 			Notes:         "Fonte: bbr.org",
@@ -262,3 +264,104 @@ func TestBuildClaimsFeatureAndFirmwareMismatch(t *testing.T) {
 		}
 	}
 }
+
+// TestAudit_MissingModelNeverApplicable assegura que ausência de ModelMatch impede aplicabilidade
+func TestAudit_MissingModelNeverApplicable(t *testing.T) {
+	eng := NewEngine()
+	claim := &domain.Claim{
+		ID:    "claim-audit-1",
+		Title: "Huawei NE8000 firmware BGP",
+	}
+	evidences := []domain.Evidence{
+		{
+			ID:            "ev-audit-1",
+			Stance:        "supports",
+			IsOfficialDoc: true,
+			VendorMatch:   true,
+			ModelMatch:    false, // modelo não comprovado!
+			FirmwareMatch: true,
+			FeatureMatch:  true,
+			Notes:         "Fonte: support.huawei.com | firmware verificado | modelo correspondente",
+		},
+	}
+
+	eng.ResolveClaimStatus(claim, evidences)
+
+	if claim.Applicability == "applicable" {
+		t.Fatalf("VIOLAÇÃO P0-01: Claim com ModelMatch=false foi marcada como applicable! Status: %s, Applicability: %s",
+			claim.Status, claim.Applicability)
+	}
+	if claim.Status != "documented" || claim.Applicability != "indeterminate" {
+		t.Fatalf("Esperava status 'documented' e applicability 'indeterminate', obteve status '%s' e applicability '%s'",
+			claim.Status, claim.Applicability)
+	}
+}
+
+// TestAudit_NotesCannotOverrideMissingStructuredEvidence assegura que notas textuais jamais sobrepõem campos estruturados falsos
+func TestAudit_NotesCannotOverrideMissingStructuredEvidence(t *testing.T) {
+	eng := NewEngine()
+	claim := &domain.Claim{
+		ID:    "claim-audit-2",
+		Title: "Huawei NE8000 BGP",
+	}
+	evidences := []domain.Evidence{
+		{
+			ID:            "ev-audit-2",
+			Stance:        "supports",
+			IsOfficialDoc: true,
+			VendorMatch:   false,
+			ModelMatch:    false,
+			FirmwareMatch: false,
+			FeatureMatch:  false,
+			Notes:         "Fonte: support.huawei.com | firmware verificado | modelo correspondente",
+		},
+	}
+
+	eng.ResolveClaimStatus(claim, evidences)
+
+	if claim.Applicability == "applicable" || claim.Status == "sustained" {
+		t.Fatalf("VIOLAÇÃO P0-01: Notas textuais sobrepuseram campos estruturados falsos! Status: %s, Applicability: %s",
+			claim.Status, claim.Applicability)
+	}
+	if claim.Status != "documented" || claim.Applicability != "indeterminate" {
+		t.Fatalf("Esperava status 'documented' e applicability 'indeterminate', obteve status '%s' e applicability '%s'",
+			claim.Status, claim.Applicability)
+	}
+}
+
+// TestAudit_DocumentedPassageWithoutModelEvidence assegura que passagem oficial sem menção ao modelo não é promovida a applicable
+func TestAudit_DocumentedPassageWithoutModelEvidence(t *testing.T) {
+	eng := NewEngine()
+	query := "Huawei NE8000 VRPv8 BGP peering"
+
+	passages := []domain.SearchResult{
+		{
+			PassageID:  1,
+			DocumentID: "doc-official-no-model",
+			Domain:     "support.huawei.com",
+			Snippet:    "Huawei VRPv8 bgp 65000 peer 10.1.1.1 as-number 65001", // contém Huawei, VRPv8, BGP, mas NÃO contém NE8000
+			SHA256:     "sha256-no-model",
+		},
+	}
+
+	claims := eng.BuildClaimsFromPassages("camp-audit-3", query, passages)
+	if len(claims) == 0 {
+		t.Fatalf("Esperava ao menos 1 claim sintetizada")
+	}
+
+	for _, c := range claims {
+		if c.Applicability == "applicable" {
+			t.Fatalf("VIOLAÇÃO P0-01: Passagem oficial sem modelo NE8000 gerou applicability 'applicable': %+v", c)
+		}
+		if c.Status != "documented" || c.Applicability != "indeterminate" {
+			t.Fatalf("Esperava status 'documented' e applicability 'indeterminate', obteve status '%s' e applicability '%s'",
+				c.Status, c.Applicability)
+		}
+		for _, ev := range c.Evidences {
+			if ev.ModelMatch {
+				t.Fatalf("Evidência não deveria ter ModelMatch=true sem menção ao NE8000: %+v", ev)
+			}
+		}
+	}
+}
+
