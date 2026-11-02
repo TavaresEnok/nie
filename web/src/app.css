@@ -1302,3 +1302,120 @@ footer {
 .alert-row.warning { border-left: 4px solid var(--amber); }
 .alert-row.info { border-left: 4px solid var(--blue); }
 
+/* ---------- Fase 3: Visual Graph Explorer & Multi-Origin DAG ---------- */
+.graph-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+  padding: 0.8rem 1rem;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.graph-view-modes {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.graph-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.edges-network {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.edge-card {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 1rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.edge-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-elev-2);
+}
+
+.edge-source, .edge-target {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.edge-url {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.84rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-main);
+}
+
+.edge-arrow {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--accent);
+  font-weight: bold;
+}
+
+.edge-kind-badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(35, 134, 54, 0.2);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.convergence-badge {
+  align-self: flex-start;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(88, 166, 255, 0.2);
+  color: var(--blue);
+  border: 1px solid var(--blue);
+  margin-top: 0.2rem;
+}
+
+.node-inspector {
+  margin-top: 1.5rem;
+  padding: 1.2rem;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+}
+
+.node-inspector h3 {
+  margin: 0 0 0.8rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inspector-origins, .inspector-targets {
+  margin-top: 0.8rem;
+  padding-left: 1.2rem;
+  font-size: 0.86rem;
+  font-family: monospace;
+}
+

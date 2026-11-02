@@ -314,3 +314,114 @@ func hashFor(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// TestP103_MultipleOriginsPreserveEdges verifica que se A e B apontam para C:
+// Ocorre apenas 1 job de coleta para C, mas 2 arestas distintas no grafo de descoberta.
+func TestP103_MultipleOriginsPreserveEdges(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("NIE_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("NIE_TEST_DATABASE_URL não definido")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	st, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	camp, err := st.CreateCampaign(ctx, "teste P1-03 multi-origem "+suffix, []string{"https://seed.example"}, domain.Budget{
+		MaxDepth:   3,
+		MaxURLs:    20,
+		MaxDomains: 10,
+		MaxBytes:   10 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	urlA := "https://page-a.example/guide"
+	urlB := "https://page-b.example/forum"
+	targetC := "https://target-c.example/telecom-firmware.pdf"
+
+	// 1. A descobre C (primeira vez -> job inserido e aresta gravada)
+	enq1, err := st.EnqueueFetch(ctx, camp.ID, targetC, 1, urlA, "link", 40)
+	if err != nil {
+		t.Fatalf("EnqueueFetch A->C falhou: %v", err)
+	}
+	if !enq1 {
+		t.Fatalf("Esperava que primeiro enfileiramento de C retornasse true")
+	}
+
+	// 2. B também descobre C (segunda vez -> dedup no download, mas aresta B->C deve ser preservada!)
+	enq2, err := st.EnqueueFetch(ctx, camp.ID, targetC, 1, urlB, "link", 40)
+	if err != nil {
+		t.Fatalf("EnqueueFetch B->C falhou: %v", err)
+	}
+	if enq2 {
+		t.Fatalf("Esperava que segundo enfileiramento de C retornasse false (job deduplicado)")
+	}
+
+	// 3. Verifica o grafo: deve conter as duas arestas rastreáveis (A->C e B->C)
+	graph, err := st.GetDiscoveryGraph(ctx, camp.ID)
+	if err != nil {
+		t.Fatalf("GetDiscoveryGraph falhou: %v", err)
+	}
+
+	foundAC := false
+	foundBC := false
+	for _, edge := range graph.Edges {
+		if edge.Target == targetC {
+			if edge.Source == urlA {
+				foundAC = true
+			}
+			if edge.Source == urlB {
+				foundBC = true
+			}
+		}
+	}
+
+	if !foundAC || !foundBC {
+		t.Fatalf("Critério de aceite P1-03 não satisfeito: A->C (%v), B->C (%v) em arestas: %+v", foundAC, foundBC, graph.Edges)
+	}
+}
+
+// TestP102_ConcurrentMigrations verifica inicialização concorrente de duas instâncias
+// usando advisory lock com conexão dedicada sem travamento ou migração duplicada.
+func TestP102_ConcurrentMigrations(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("NIE_TEST_DATABASE_URL"))
+	if dsn == "" {
+		t.Skip("NIE_TEST_DATABASE_URL não definido")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	st1, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st1.Close)
+
+	st2, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st2.Close)
+
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- st1.Migrate(ctx)
+	}()
+	go func() {
+		errCh <- st2.Migrate(ctx)
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("Migração concorrente falhou: %v", err)
+		}
+	}
+}
+

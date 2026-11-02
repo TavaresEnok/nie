@@ -63,7 +63,7 @@ func main() {
 	go w.Run(ctx)
 
 	if cfg.SchedulerEnabled {
-		sched := scheduler.New(st, logger, cfg.SchedulerInterval)
+		sched := scheduler.New(st, logger, cfg)
 		sched.Start(ctx)
 		defer sched.Stop()
 	}

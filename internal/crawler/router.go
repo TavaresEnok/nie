@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,12 +16,40 @@ import (
 
 	"nie/internal/domain"
 	"nie/internal/extract"
+	"nie/internal/netguard"
 	"nie/internal/urlutil"
 )
 
 var (
 	ErrNoExecutorAvailable = errors.New("nenhum executor disponível para a tarefa")
 )
+
+func validatePublicTarget(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("URL inválida: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("host vazio")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !netguard.IsPublicIP(ip) {
+			return fmt.Errorf("IP %s bloqueado por política de egress", ip.String())
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("resolver host %s: %w", host, err)
+	}
+	for _, ip := range ips {
+		if !netguard.IsPublicIP(ip) {
+			return fmt.Errorf("resolução de %s para %s bloqueada por política de egress", host, ip.String())
+		}
+	}
+	return nil
+}
 
 // Executor define a interface canônica para qualquer motor de coleta (Native Go, Scrapy, Crawl4AI).
 // Atende à diretriz do ADENDO MESTRE V2.1: todas as saídas passam pelo mesmo contrato.
@@ -74,6 +103,9 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 		ContentType:       resp.ContentType,
 		RawContent:        resp.Body,
 		Text:              ex.Text,
+		Title:             ex.Title,
+		ETag:              resp.Header.Get("ETag"),
+		LastModified:      resp.Header.Get("Last-Modified"),
 		ExtractedLinks:    ex.Links,
 		ExtractedMentions: mentions,
 		Duration:          duration,
@@ -81,6 +113,8 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 			"executor":   "native",
 			"byte_count": len(resp.Body),
 			"title":      ex.Title,
+			"mime":       ex.MIME,
+			"passages":   ex.Passages,
 		},
 	}, nil
 }
@@ -103,6 +137,9 @@ func NewScrapyBridge(endpoint string, fallback Executor) *ScrapyBridge {
 func (s *ScrapyBridge) Name() string { return "scrapy" }
 
 func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*domain.FetchResult, error) {
+	if err := validatePublicTarget(task.URL); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBlocked, err)
+	}
 	if s.endpoint == "" {
 		if s.fallback != nil {
 			return s.fallback.Execute(ctx, task)
@@ -164,6 +201,7 @@ func (s *ScrapyBridge) Execute(ctx context.Context, task domain.FetchTask) (*dom
 		EffectiveURL:      res.EffectiveURL,
 		StatusCode:        res.StatusCode,
 		ContentType:       res.ContentType,
+		RawContent:        []byte(res.Text),
 		Text:              res.Text,
 		ExtractedLinks:    res.ExtractedLinks,
 		ExtractedMentions: mentions,
@@ -192,6 +230,9 @@ func NewCrawl4AIBridge(endpoint string, fallback Executor) *Crawl4AIBridge {
 func (c *Crawl4AIBridge) Name() string { return "crawl4ai" }
 
 func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*domain.FetchResult, error) {
+	if err := validatePublicTarget(task.URL); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBlocked, err)
+	}
 	if c.endpoint == "" {
 		if c.fallback != nil {
 			return c.fallback.Execute(ctx, task)
@@ -254,6 +295,7 @@ func (c *Crawl4AIBridge) Execute(ctx context.Context, task domain.FetchTask) (*d
 		EffectiveURL:      res.EffectiveURL,
 		StatusCode:        res.StatusCode,
 		ContentType:       res.ContentType,
+		RawContent:        []byte(res.Markdown),
 		Text:              res.Markdown,
 		ExtractedLinks:    res.ExtractedLinks,
 		ExtractedMentions: mentions,

@@ -345,6 +345,9 @@ type FetchResult struct {
 	ContentType       string         `json:"content_type"`
 	RawContent        []byte         `json:"-"`
 	Text              string         `json:"text"`
+	Title             string         `json:"title,omitempty"`
+	ETag              string         `json:"etag,omitempty"`
+	LastModified      string         `json:"last_modified,omitempty"`
 	ExtractedLinks    []string       `json:"extracted_links"`
 	ExtractedMentions []string       `json:"extracted_mentions"`
 	Duration          time.Duration  `json:"duration"`

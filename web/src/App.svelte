@@ -38,6 +38,10 @@
   let loadingDeep = $state(false)
   let claimsList = $state([])
   let graphData = $state({ nodes: [], edges: [] })
+  let graphFilter = $state('all')
+  let graphSearch = $state('')
+  let selectedNode = $state(null)
+  let graphMode = $state('edges') // 'edges' or 'tree'
   let schedules = $state([])
   let alerts = $state([])
   let gitResults = $state([])
@@ -249,10 +253,42 @@
       const data = await api(`/api/campaigns/${campaignID}/graph`)
       graphData = data
       selectedID = campaignID
+      selectedNode = null
       view = 'graph'
     } catch (e) {
       error = e.message
     }
+  }
+
+  function getNodeInbound(nodeId) {
+    if (!graphData.edges) return []
+    return graphData.edges.filter(e => e.target === nodeId)
+  }
+
+  function getNodeOutbound(nodeId) {
+    if (!graphData.edges) return []
+    return graphData.edges.filter(e => e.source === nodeId)
+  }
+
+  function selectNodeByID(nodeId) {
+    const n = (graphData.nodes || []).find(x => x.id === nodeId)
+    if (n) {
+      selectedNode = n
+    } else {
+      selectedNode = { id: nodeId, label: nodeId, domain: '', depth: 0, type: 'external' }
+    }
+  }
+
+  function filteredEdges() {
+    let list = graphData.edges || []
+    if (graphFilter !== 'all') {
+      list = list.filter(e => e.kind === graphFilter)
+    }
+    if (graphSearch.trim()) {
+      const q = graphSearch.toLowerCase()
+      list = list.filter(e => (e.source && e.source.toLowerCase().includes(q)) || (e.target && e.target.toLowerCase().includes(q)))
+    }
+    return list
   }
 
   // Fase 3: Agendamentos e Alertas
@@ -767,7 +803,7 @@
     <div class="section-head">
       <div>
         <p class="eyebrow">Fase 3 — Autonomia e Ramificações</p>
-        <h1>Grafo Visual de Descoberta ("Água & Eletricidade")</h1>
+        <h1>Grafo Visual de Descoberta & Rastreabilidade ("Água & Eletricidade")</h1>
       </div>
       <div class="head-actions">
         <select bind:value={selectedID} onchange={() => loadGraph(selectedID)}>
@@ -782,27 +818,140 @@
     {#if graphData.nodes.length === 0}
       <div class="empty">
         <strong>Nenhum grafo carregado.</strong>
-        <p>Selecione uma campanha para inspecionar a árvore de ramificações e links seguidos.</p>
+        <p>Selecione uma campanha para inspecionar a rede de conexões, origens múltiplas e ramificações.</p>
       </div>
     {:else}
       <div class="graph-container">
         <div class="panel">
-          <div class="meta" style="margin-bottom:1rem;">
-            <span>{graphData.nodes.length} nós descobertos</span>
-            <span>·</span>
-            <span>{graphData.edges.length} conexões e ramificações</span>
+          <div class="graph-toolbar">
+            <div class="graph-view-modes">
+              <button class:primary={graphMode === 'edges'} onclick={() => graphMode = 'edges'}>
+                Ligações Visuais ({graphData.edges.length})
+              </button>
+              <button class:primary={graphMode === 'tree'} onclick={() => graphMode = 'tree'}>
+                Hierarquia ({graphData.nodes.length})
+              </button>
+            </div>
+            <div class="graph-filters">
+              <select bind:value={graphFilter}>
+                <option value="all">Todos os tipos</option>
+                <option value="link">Links (HTTP)</option>
+                <option value="mention">Menções Técnicas</option>
+                <option value="seed">Sementes</option>
+                <option value="searxng">SearXNG</option>
+              </select>
+              <input
+                type="search"
+                placeholder="Filtrar URL ou domínio..."
+                bind:value={graphSearch}
+                style="padding: 0.35rem 0.6rem; font-size: 0.85rem;"
+              />
+            </div>
           </div>
-          <div class="graph-tree">
-            {#each graphData.nodes as node}
-              <div class="tree-node depth-{node.depth}" class:mention-node={node.type === 'mention'}>
-                <span class="depth">n{node.depth}</span>
-                <span class="cap on" class:mention-cap={node.type === 'mention'}>{node.type === 'mention' ? 'menção técnica' : node.type}</span>
-                <strong>{node.label}</strong>
-                <span class="muted small">{node.domain}</span>
-                <span class="hash">{node.id}</span>
+
+          {#if graphMode === 'edges'}
+            <div class="edges-network">
+              {#if filteredEdges().length === 0}
+                <div class="muted small" style="padding:1rem;">Nenhuma ligação encontrada para o filtro selecionado.</div>
+              {/if}
+              {#each filteredEdges() as edge}
+                <div class="edge-card">
+                  <div
+                    class="edge-source"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => selectNodeByID(edge.source)}
+                    onkeydown={(e) => { if (e.key === 'Enter') selectNodeByID(edge.source) }}
+                  >
+                    <span class="cap small">origem</span>
+                    <span class="edge-url" title={edge.source}>{edge.source || 'Início da Campanha (Seed)'}</span>
+                  </div>
+                  <div class="edge-arrow">
+                    <span class="edge-kind-badge">{edge.kind}</span>
+                    <span class="arrow-head">──►</span>
+                  </div>
+                  <div
+                    class="edge-target"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => selectNodeByID(edge.target)}
+                    onkeydown={(e) => { if (e.key === 'Enter') selectNodeByID(edge.target) }}
+                  >
+                    <span class="cap small on">destino</span>
+                    <span class="edge-url" title={edge.target}>{edge.target}</span>
+                    {#if getNodeInbound(edge.target).length > 1}
+                      <span class="convergence-badge" title="Múltiplas páginas independentes convergiram para esta mesma URL">
+                        ⚡ {getNodeInbound(edge.target).length} origens rastreadas
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="graph-tree">
+              {#each graphData.nodes as node}
+                <div
+                  class="tree-node depth-{node.depth}"
+                  class:mention-node={node.type === 'mention'}
+                  role="button"
+                  tabindex="0"
+                  onclick={() => selectedNode = node}
+                  onkeydown={(e) => { if (e.key === 'Enter') selectedNode = node }}
+                  style="cursor:pointer;"
+                >
+                  <span class="depth">n{node.depth}</span>
+                  <span class="cap on" class:mention-cap={node.type === 'mention'}>{node.type === 'mention' ? 'menção técnica' : node.type}</span>
+                  <strong>{node.label}</strong>
+                  <span class="muted small">{node.domain}</span>
+                  {#if getNodeInbound(node.id).length > 1}
+                    <span class="convergence-badge">⚡ {getNodeInbound(node.id).length} origens</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if selectedNode}
+            <div class="node-inspector">
+              <h3>
+                <span>Detalhes do Recurso: <strong>{selectedNode.label}</strong></span>
+                <button class="small" onclick={() => selectedNode = null}>✕ Fechar</button>
+              </h3>
+              <div class="meta" style="margin-bottom:0.6rem;">
+                <span>ID: {selectedNode.id}</span>
+                <span>Tipo: {selectedNode.type}</span>
+                <span>Profundidade: {selectedNode.depth}</span>
+                {#if selectedNode.domain}<span>Domínio: {selectedNode.domain}</span>{/if}
               </div>
-            {/each}
-          </div>
+
+              <div style="margin-top:0.6rem;">
+                <strong>Origens que apontam para este nó ({getNodeInbound(selectedNode.id).length}):</strong>
+                {#if getNodeInbound(selectedNode.id).length === 0}
+                  <div class="muted small">Nenhuma origem direta (nó raiz ou semente).</div>
+                {:else}
+                  <ul class="inspector-origins">
+                    {#each getNodeInbound(selectedNode.id) as inEdge}
+                      <li>[{inEdge.kind}] {inEdge.source || '(campanha raiz)'}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+
+              <div style="margin-top:0.6rem;">
+                <strong>Destinos descobertos a partir deste nó ({getNodeOutbound(selectedNode.id).length}):</strong>
+                {#if getNodeOutbound(selectedNode.id).length === 0}
+                  <div class="muted small">Nenhum recurso subsequente derivado.</div>
+                {:else}
+                  <ul class="inspector-targets">
+                    {#each getNodeOutbound(selectedNode.id) as outEdge}
+                      <li>[{outEdge.kind}] {outEdge.target}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            </div>
+          {/if}
         </div>
       </div>
     {/if}

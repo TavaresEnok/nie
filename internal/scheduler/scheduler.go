@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"nie/internal/config"
 	"nie/internal/domain"
 	"nie/internal/store"
 )
@@ -14,18 +15,21 @@ import (
 type Runner struct {
 	store    *store.Store
 	logger   *slog.Logger
+	cfg      config.Config
 	interval time.Duration
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
 }
 
-func New(st *store.Store, logger *slog.Logger, interval time.Duration) *Runner {
+func New(st *store.Store, logger *slog.Logger, cfg config.Config) *Runner {
+	interval := cfg.SchedulerInterval
 	if interval < 5*time.Second {
 		interval = 30 * time.Second
 	}
 	return &Runner{
 		store:    st,
 		logger:   logger,
+		cfg:      cfg,
 		interval: interval,
 		stopCh:   make(chan struct{}),
 	}
@@ -79,13 +83,37 @@ func (r *Runner) tick(ctx context.Context) error {
 			continue
 		}
 
+		// Garante a fase de descoberta externa quando não há seeds ou para enriquecimento contínuo
+		if len(s.SeedURLs) == 0 || r.cfg.MwmblURL != "" || r.cfg.SearXNGURL != "" {
+			if r.cfg.MwmblURL != "" {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_mwmbl", s.Query); err != nil {
+					r.logger.Warn("enfileirar mwmbl para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
+			if r.cfg.SearXNGURL != "" {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_web", s.Query); err != nil {
+					r.logger.Warn("enfileirar web para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
+			if r.cfg.GitHubEnabled {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_github", s.Query); err != nil {
+					r.logger.Warn("enfileirar github para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
+			if r.cfg.SoftwareHeritageEnabled {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_swh", s.Query); err != nil {
+					r.logger.Warn("enfileirar swh para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
+		}
+
 		nextRun := time.Now().Add(time.Duration(s.IntervalSeconds) * time.Second)
 		if err := r.store.MarkScheduleRun(ctx, s.ID, camp.ID, nextRun); err != nil {
 			r.logger.Error("falha ao atualizar próximo disparo do agendamento", "schedule_id", s.ID, "err", err)
 		}
 
 		// Registrar alerta informativo de disparo
-		_ = r.store.CreateAlert(ctx, &camp.ID, fmt.Sprintf("Agendamento disparado: %s", s.Name), fmt.Sprintf("Campanha '%s' criada automaticamente.", camp.ID), "info")
+		_ = r.store.CreateAlert(ctx, &camp.ID, fmt.Sprintf("Agendamento disparado: %s", s.Name), fmt.Sprintf("Campanha '%s' criada automaticamente com descoberta contínua.", camp.ID), "info")
 	}
 	return nil
 }

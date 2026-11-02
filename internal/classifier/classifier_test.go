@@ -61,3 +61,47 @@ func TestClassifyCisco(t *testing.T) {
 		t.Errorf("esperava IOS-XR, obteve %s", res.Vendors[0].OS)
 	}
 }
+
+func TestOfficialDomainSpoofing(t *testing.T) {
+	adversarialNegative := []string{
+		"huawei.com.attacker.com",
+		"http://huawei.com.exemplo-atacante.com/malicious",
+		"evil-cisco.com",
+		"notcisco.com",
+		"cisco.com.attacker.net",
+		"zte.com.cn.fake.org",
+		"user:pass@attacker.com#huawei.com",
+		"http://attacker.com/?redirect=huawei.com",
+		"fiberhome.com.br", // se oficial for fiberhome.com
+		"fakefiberhome.com",
+		"mikrotik.com.br.evil.com",
+	}
+
+	for _, domain := range adversarialNegative {
+		if IsOfficialDomain(domain) {
+			t.Errorf("Vulnerabilidade P0-02 detectada! Domínio adversário foi classificado como oficial: %s", domain)
+		}
+	}
+
+	legitimatePositive := []string{
+		"huawei.com",
+		"support.huawei.com",
+		"https://support.huawei.com/enterprise/en/doc/EDOC11000",
+		"cisco.com",
+		"support.cisco.com",
+		"http://help.mikrotik.com/docs/display/ROS/BGP",
+		"mikrotik.com",
+		"forum.mikrotik.com",
+		"datacom.com.br",
+		"support.datacom.com.br",
+		"fiberhome.com",
+		"cisco.com:8443",
+	}
+
+	for _, domain := range legitimatePositive {
+		if !IsOfficialDomain(domain) {
+			t.Errorf("Domínio legítimo não foi reconhecido como oficial: %s", domain)
+		}
+	}
+}
+

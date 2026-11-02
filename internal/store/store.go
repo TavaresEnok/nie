@@ -333,11 +333,11 @@ func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, dep
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() > 0 {
+	if parentURL != "" {
 		_, _ = tx.Exec(ctx, `
 			INSERT INTO discovery_edges(campaign_id, from_url, to_url, to_domain, kind, depth, reason)
 			VALUES($1::uuid, $2, $3, $4, 'link', $5, $6)
-			ON CONFLICT DO NOTHING`,
+			ON CONFLICT (campaign_id, from_url, to_url, kind) DO NOTHING`,
 			campaignID, parentURL, norm, domainName, depth, reason)
 	}
 	if status == "completed" {
@@ -353,8 +353,8 @@ func (s *Store) RecordDiscoveryEdge(ctx context.Context, campaignID, fromURL, to
 	toDomain := urlutil.Domain(toURL)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO discovery_edges(campaign_id, from_url, to_url, to_domain, kind, depth, reason)
-		VALUES($1::uuid, NULLIF($2, ''), $3, $4, $5, $6, $7)
-		ON CONFLICT (campaign_id, to_url) DO NOTHING
+		VALUES($1::uuid, COALESCE(NULLIF($2, ''), ''), $3, $4, $5, $6, $7)
+		ON CONFLICT (campaign_id, from_url, to_url, kind) DO NOTHING
 	`, campaignID, fromURL, toURL, toDomain, kind, depth, reason)
 	return err
 }
@@ -532,11 +532,12 @@ func (s *Store) FinishIfIdle(ctx context.Context, campaignID string) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Store) CampaignContext(ctx context.Context, campaignID string) (domain.Budget, int64, error) {
+func (s *Store) CampaignContext(ctx context.Context, campaignID string) (domain.Budget, int64, string, error) {
 	var b domain.Budget
 	var used int64
+	var query string
 	err := s.pool.QueryRow(ctx, `
-		SELECT c.max_depth, c.max_urls, c.max_domains, c.max_bytes, c.min_domain_interval_seconds,
+		SELECT c.query, c.max_depth, c.max_urls, c.max_domains, c.max_bytes, c.min_domain_interval_seconds,
 		       COALESCE((
 			SELECT sum(x.size) FROM (
 				SELECT DISTINCT d.id, d.size
@@ -545,11 +546,11 @@ func (s *Store) CampaignContext(ctx context.Context, campaignID string) (domain.
 			) x
 		), 0)::bigint
 		FROM campaigns c WHERE c.id=$1::uuid`, campaignID).
-		Scan(&b.MaxDepth, &b.MaxURLs, &b.MaxDomains, &b.MaxBytes, &b.MinDomainIntervalSeconds, &used)
+		Scan(&query, &b.MaxDepth, &b.MaxURLs, &b.MaxDomains, &b.MaxBytes, &b.MinDomainIntervalSeconds, &used)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return b, 0, ErrNotFound
+		return b, 0, "", ErrNotFound
 	}
-	return b, used, err
+	return b, used, query, err
 }
 
 // Throttle retorna (próximaJanela, permitido). Quando permitido=false, o job deve ser adiado.

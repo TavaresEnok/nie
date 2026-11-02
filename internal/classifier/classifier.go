@@ -1,6 +1,8 @@
 package classifier
 
 import (
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -21,11 +23,11 @@ type ClassificationResult struct {
 }
 
 var officialDomains = []string{
-	"support.huawei.com", "huawei.com",
-	"help.mikrotik.com", "mikrotik.com",
-	"cisco.com", "support.cisco.com",
-	"datacom.com.br", "support.datacom.com.br",
-	"zte.com.cn", "support.zte.com.cn",
+	"huawei.com",
+	"mikrotik.com",
+	"cisco.com",
+	"datacom.com.br",
+	"zte.com.cn",
 	"fiberhome.com",
 	"vsolcn.com",
 	"sonicwall.com",
@@ -41,19 +43,50 @@ var (
 	reGenericCLI  = regexp.MustCompile(`(?mi)^\s*(?:#|\$|>)\s*([a-zA-Z0-9_\-\.\/]{2,}\s+[^\n\r]+)`)
 )
 
+// CanonicalHost extrai o hostname limpo em minúsculas sem porta, userinfo ou trailing dot.
+func CanonicalHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+			raw = u.Hostname()
+		}
+	} else if strings.Contains(raw, "/") {
+		raw = strings.SplitN(raw, "/", 2)[0]
+	}
+	if idx := strings.LastIndex(raw, "@"); idx != -1 {
+		raw = raw[idx+1:]
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	return strings.ToLower(strings.TrimRight(raw, "."))
+}
+
+// IsOfficialDomain valida se o host corresponde estritamente ao domínio oficial ou a um subdomínio legítimo.
+// Previne vulnerabilidades onde strings.Contains(lower, "huawei.com") aceitava "huawei.com.attacker.com".
+func IsOfficialDomain(domainOrURL string) bool {
+	host := CanonicalHost(domainOrURL)
+	if host == "" {
+		return false
+	}
+	for _, off := range officialDomains {
+		offCanonical := strings.ToLower(strings.TrimSpace(off))
+		if host == offCanonical || strings.HasSuffix(host, "."+offCanonical) {
+			return true
+		}
+	}
+	return false
+}
+
 func Classify(text string, domain string) ClassificationResult {
 	res := ClassificationResult{
-		Vendors:     []DetectedVendor{},
-		CLICommands: []string{},
-		Tags:        []string{},
-	}
-
-	lowerDomain := strings.ToLower(domain)
-	for _, off := range officialDomains {
-		if strings.Contains(lowerDomain, off) {
-			res.IsOfficialDoc = true
-			break
-		}
+		Vendors:       []DetectedVendor{},
+		CLICommands:   []string{},
+		Tags:          []string{},
+		IsOfficialDoc: IsOfficialDomain(domain),
 	}
 
 	lowerText := strings.ToLower(text)

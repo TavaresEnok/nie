@@ -7,12 +7,29 @@ CLI, configurações, RFCs, datasheets, READMEs e notas de versão.
 Cada resultado de busca aponta para o documento original, o trecho exato, a
 página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 
-> **Status do Projeto:** Todas as fases do plano mestre implementadas e testadas:
-> - **Fase 0:** Dataset e suíte de benchmark com 20 problemas reais de telecom multivendor.
-> - **Fase 1:** Vertical Slice do MVP (API Huma, PostgreSQL 18, crawler seguro, storage SHA-256 e busca híbrida).
-> - **Fase 2:** Motor de Evidências, Claims, Origin Clusters (anti-cópia) e Dossiês Técnicos com IA plugável.
-> - **Fase 3:** Autonomia contínua, agendamento de campanhas recorrentes, alertas de documentação e Grafo de Descobertas.
-> - **Fase 4:** Busca em repositórios Git locais, fallback OCR para PDFs e exportação de relatórios.
+> **Status de Auditoria e Conformidade:**
+> O NIE adota transparência estrita entre o que está implementado, o que foi testado em laboratório e o que está planejado para fases futuras.
+
+## Matriz de Conformidade e Status dos Requisitos
+
+| Requisito / Componente | Escopo | Status Real | Evidência / Testes |
+|---|---|---|---|
+| **Go 1.24+ / Huma / pgxpool** | Framework API & HTTP | **Implementado** | `cmd/nie/main.go`, `internal/api/api.go` |
+| **PostgreSQL 18 + SKIP LOCKED** | Fila e Storage | **Implementado & Testado** | `internal/store/store.go`, `store_integration_test.go` |
+| **Proteção Anti-SSRF & Netguard** | Egress Efetivo (P0-03) | **Implementado & Testado** | `internal/netguard/ip.go`, `internal/crawler/router.go`, workers Python |
+| **Validação Canônica de Domínio Oficial** | Anti-Spoofing (P0-02) | **Implementado & Testado** | `internal/classifier/classifier.go`, `classifier_test.go` |
+| **Motor de Evidências Epistemológico** | Rigor Técnico (P0-01) | **Implementado & Testado** | `internal/evidence/engine.go`, `engine_test.go` (sem rótulos infundados de 'verificado') |
+| **Origin Clustering Anti-Cópia** | Thread-Safe (P1-06) | **Implementado & Testado** | `internal/evidence/clustering.go` (`sync.RWMutex`, N réplicas = 1 cluster) |
+| **Preservação de Todas as Arestas** | Grafo Multi-Origens (P1-03) | **Implementado & Testado** | `internal/store/store.go`, `TestP103_MultipleOriginsPreserveEdges` |
+| **Advisory Lock por Conexão Dedicada** | Migração Segura (P1-02) | **Implementado & Testado** | `internal/store/migrate.go`, `TestP102_ConcurrentMigrations` |
+| **Fronteira com Focused Crawling Dinâmico** | Priorização por Score (P1-04) | **Implementado & Testado** | `internal/worker/worker.go` (`computeFrontierPriority`) |
+| **Grafo Visual Interativo com Multi-Origens** | UI de Descoberta (P1-04) | **Implementado** | `web/src/App.svelte` (visualização de ligações `A->C`, `B->C` e convergência) |
+| **Agendamento com Fase de Descoberta** | Scheduler Autônomo (P1-01) | **Implementado** | `internal/scheduler/scheduler.go` (dispara adaptadores mesmo sem seeds) |
+| **Configuração SearXNG JSON** | API SearXNG (P0-04) | **Implementado** | `config/searxng/settings.yml`, `docker-compose.yml` |
+| **Git Eye / Descoberta Local e Remota** | Código Técnico (P1-05) | **Implementado & Testado** | `internal/discovery/git_local.go`, `git_local_test.go` (.cfg, .rsc rastreados) |
+| **Workers Scrapy e Crawl4AI com Egress Guard** | Bridges Isoladas (P0-03) | **Implementado & Protegido**| `workers/scrapy_worker/app.py`, `workers/crawl4ai_worker/app.py` |
+| **Docling / Tika / OCR Avançado** | Extração Especializada | **Parcial / Planejado** | Extração nativa Go de PDF/HTML ativa; OCR sob demanda planejado para worker dedicado |
+| **Busca Semântica com Embeddings (pgvector)** | Vetores e Reranker | **Planejado para V3** | Atualmente exact + FTS tsvector + trigramas pg_trgm ativo no PostgreSQL |
 
 ## O que já funciona
 

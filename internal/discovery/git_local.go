@@ -18,8 +18,10 @@ func NewGitLocal(baseDir string) *GitLocalFinder {
 }
 
 type LocalFileMatch struct {
-	Path    string `json:"path"`
-	Snippet string `json:"snippet"`
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	Snippet  string `json:"snippet"`
+	Revision string `json:"revision,omitempty"`
 }
 
 // Search scans local git repositories or config folders for target query keywords.
@@ -83,8 +85,10 @@ func (g *GitLocalFinder) Search(ctx context.Context, query string, maxResults in
 		}
 
 		if allMatched {
-			// Extract snippet
+			// Extract snippet and line number
 			idx := strings.Index(lowerContent, terms[0])
+			lineNum := strings.Count(content[:idx], "\n") + 1
+
 			start := idx - 80
 			if start < 0 {
 				start = 0
@@ -95,8 +99,10 @@ func (g *GitLocalFinder) Search(ctx context.Context, query string, maxResults in
 			}
 			snippet := strings.TrimSpace(content[start:end])
 			results = append(results, LocalFileMatch{
-				Path:    path,
-				Snippet: fmt.Sprintf("...%s...", snippet),
+				Path:     path,
+				Line:     lineNum,
+				Snippet:  fmt.Sprintf("...%s...", snippet),
+				Revision: "HEAD",
 			})
 			if len(results) >= maxResults {
 				return filepath.SkipAll

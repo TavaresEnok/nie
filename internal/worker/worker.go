@@ -223,7 +223,7 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 	if err != nil {
 		return &jobError{err: err, permanent: true}
 	}
-	budget, used, err := w.store.CampaignContext(ctx, job.CampaignID)
+	budget, used, campaignQuery, err := w.store.CampaignContext(ctx, job.CampaignID)
 	if err != nil {
 		return err
 	}
@@ -255,31 +255,32 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		return nil
 	}
 
-	resp, err := w.fetcher.Fetch(ctx, norm)
+	task := crawler.BuildFetchTask(job.CampaignID, norm, "http", "", budget.MaxBytes)
+	fetchResult, err := w.router.Execute(ctx, task)
 	if err != nil {
 		return classifyFetchError(err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if (resp.StatusCode == 404 || resp.StatusCode == 410) && w.wayback != nil && w.cfg.WaybackEnabled {
+	if fetchResult.StatusCode < 200 || fetchResult.StatusCode >= 300 {
+		if (fetchResult.StatusCode == 404 || fetchResult.StatusCode == 410) && w.wayback != nil && w.cfg.WaybackEnabled {
 			if snap, wbErr := w.wayback.CheckAvailability(ctx, norm); wbErr == nil && snap != nil && snap.Available && snap.SnapshotURL != "" {
 				w.logger.Info("recurso recuperado via Wayback Machine", "original", norm, "snapshot", snap.SnapshotURL)
 				_, _ = w.store.EnqueueFetch(ctx, job.CampaignID, snap.SnapshotURL, job.Depth, norm, "wayback", 30)
 			}
 		}
 		switch {
-		case resp.StatusCode == 429:
-			return &jobError{err: &crawler.HTTPError{StatusCode: 429, URL: norm}, retryAfter: retryAfter(resp.Header, 60*time.Second)}
-		case resp.StatusCode == 408 || resp.StatusCode == 425:
-			return &jobError{err: &crawler.HTTPError{StatusCode: resp.StatusCode, URL: norm}}
-		case resp.StatusCode >= 500:
-			return &jobError{err: &crawler.HTTPError{StatusCode: resp.StatusCode, URL: norm}}
+		case fetchResult.StatusCode == 429:
+			return &jobError{err: &crawler.HTTPError{StatusCode: 429, URL: norm}, retryAfter: 60 * time.Second}
+		case fetchResult.StatusCode == 408 || fetchResult.StatusCode == 425:
+			return &jobError{err: &crawler.HTTPError{StatusCode: fetchResult.StatusCode, URL: norm}}
+		case fetchResult.StatusCode >= 500:
+			return &jobError{err: &crawler.HTTPError{StatusCode: fetchResult.StatusCode, URL: norm}}
 		default:
-			w.logger.Info("resposta ignorada", "url", norm, "status", resp.StatusCode)
+			w.logger.Info("resposta ignorada", "url", norm, "status", fetchResult.StatusCode)
 			return nil
 		}
 	}
 
-	finalRaw := resp.URL
+	finalRaw := fetchResult.EffectiveURL
 	if finalRaw == "" {
 		finalRaw = norm
 	}
@@ -292,24 +293,47 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		finalURL = u
 	}
 
-	var ex extract.Result
-	switch {
-	case strings.HasPrefix(resp.ContentType, "application/pdf"):
-		ex, err = extract.PDF(resp.Body)
-	case strings.HasPrefix(resp.ContentType, "text/html") || strings.HasPrefix(resp.ContentType, "application/xhtml+xml"):
-		ex, err = extract.HTML(finalURL, resp.ContentType, resp.Body)
-	default:
-		ex, err = extract.Text(resp.Body)
+	rawBytes := fetchResult.RawContent
+	if len(rawBytes) == 0 && fetchResult.Text != "" {
+		rawBytes = []byte(fetchResult.Text)
 	}
-	if err != nil {
-		return &jobError{err: err, permanent: true}
+	if len(rawBytes) == 0 {
+		w.logger.Info("conteúdo vazio", "url", finalNorm)
+		return nil
+	}
+
+	var ex extract.Result
+	if passagesRaw, ok := fetchResult.Metadata["passages"].([]extract.Passage); ok && len(passagesRaw) > 0 {
+		ex.Text = fetchResult.Text
+		ex.Title = fetchResult.Title
+		ex.Links = fetchResult.ExtractedLinks
+		ex.Passages = passagesRaw
+		if mimeStr, ok := fetchResult.Metadata["mime"].(string); ok {
+			ex.MIME = mimeStr
+		}
+	} else {
+		switch {
+		case strings.HasPrefix(fetchResult.ContentType, "application/pdf"):
+			ex, err = extract.PDF(rawBytes)
+		case strings.HasPrefix(fetchResult.ContentType, "text/html") || strings.HasPrefix(fetchResult.ContentType, "application/xhtml+xml"):
+			ex, err = extract.HTML(finalURL, fetchResult.ContentType, rawBytes)
+		default:
+			ex, err = extract.Text(rawBytes)
+		}
+		if err != nil {
+			return &jobError{err: err, permanent: true}
+		}
+	}
+
+	if strings.TrimSpace(ex.Text) == "" && strings.TrimSpace(fetchResult.Text) != "" {
+		ex.Text = fetchResult.Text
 	}
 	if strings.TrimSpace(ex.Text) == "" {
 		w.logger.Info("sem texto extraído", "url", finalNorm)
 		return nil
 	}
 
-	stored, err := w.storage.Put(resp.Body)
+	stored, err := w.storage.Put(rawBytes)
 	if err != nil {
 		return err
 	}
@@ -323,14 +347,14 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		Title:         ex.Title,
 		Size:          stored.Size,
 		Text:          ex.Text,
-		Metadata:      map[string]any{"requested_url": norm, "final_url": finalNorm, "passages": len(passages)},
+		Metadata:      map[string]any{"requested_url": norm, "final_url": finalNorm, "passages": len(passages), "executor": fetchResult.Metadata["executor"]},
 		CampaignID:    job.CampaignID,
 		URL:           finalNorm,
 		NormalizedURL: finalNorm,
 		Domain:        urlutil.Domain(finalNorm),
-		StatusCode:    resp.StatusCode,
-		ETag:          resp.Header.Get("ETag"),
-		LastModified:  resp.Header.Get("Last-Modified"),
+		StatusCode:    fetchResult.StatusCode,
+		ETag:          fetchResult.ETag,
+		LastModified:  fetchResult.LastModified,
 		Passages:      passages,
 	})
 	if err != nil {
@@ -340,11 +364,16 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 
 	if job.Depth < budget.MaxDepth {
 		enqueued := 0
-		for _, link := range ex.Links {
+		linksToFollow := ex.Links
+		if len(linksToFollow) == 0 {
+			linksToFollow = fetchResult.ExtractedLinks
+		}
+		for _, link := range linksToFollow {
 			if !crawlableLink(link) {
 				continue
 			}
-			ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, link, job.Depth+1, finalNorm, "link", 100)
+			prio := computeFrontierPriority(link, job.Depth+1, campaignQuery)
+			ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, link, job.Depth+1, finalNorm, "link", prio)
 			if err != nil {
 				w.logger.Warn("enfileirar link", "url", link, "err", err)
 				continue
@@ -357,12 +386,12 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 			w.logger.Info("novas pistas", "from", finalNorm, "count", enqueued)
 		}
 
-		// V2.1: Descoberta de menções técnicas sem hyperlink (árvore que cresce sozinha)
+		// V2.1: Descoberta autônoma de menções técnicas sem hyperlink (árvore que cresce sozinha)
 		if w.cfg.MentionsDiscoveryEnabled {
-			mentions := extract.ExtractMentions(ex.Text, 10)
+			mentions := extract.ExtractMentions(ex.Text, 15)
 			for _, mention := range mentions {
 				_ = w.store.RecordDiscoveryEdge(ctx, job.CampaignID, finalNorm, "mention:"+mention, "mention", "menção técnica não linkada", job.Depth+1)
-				if strings.HasPrefix(mention, "RFC ") || strings.HasPrefix(mention, "NE8000") || strings.HasPrefix(mention, "CCR") || strings.HasPrefix(mention, "DM4") {
+				if isTechnicalTelecomKeyword(mention) {
 					if w.searx != nil {
 						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_web", mention)
 					} else if w.mwmbl != nil {
@@ -566,3 +595,60 @@ func crawlableLink(raw string) bool {
 	}
 	return true
 }
+
+func computeFrontierPriority(link string, depth int, campaignQuery string) int {
+	score := 50 + depth*10
+	lowerURL := strings.ToLower(link)
+
+	if campaignQuery != "" {
+		terms := strings.Fields(strings.ToLower(campaignQuery))
+		for _, term := range terms {
+			if len(term) >= 3 && strings.Contains(lowerURL, term) {
+				score -= 15
+			}
+		}
+	}
+
+	docIndicators := []string{"doc", "manual", "guide", "cli", "command", "config", "spec", "telecom", "firmware", "pdf", "rfc", "support"}
+	for _, ind := range docIndicators {
+		if strings.Contains(lowerURL, ind) {
+			score -= 10
+			break
+		}
+	}
+
+	noiseIndicators := []string{"login", "signin", "signup", "cart", "cookie", "privacy", "terms", "facebook", "twitter", "linkedin", "instagram", "share"}
+	for _, noise := range noiseIndicators {
+		if strings.Contains(lowerURL, noise) {
+			score += 40
+			break
+		}
+	}
+
+	if score < 5 {
+		score = 5
+	}
+	if score > 200 {
+		score = 200
+	}
+	return score
+}
+
+func isTechnicalTelecomKeyword(m string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(m))
+	if len(upper) < 3 {
+		return false
+	}
+	prefixes := []string{
+		"RFC", "NE8000", "CCR", "DM4", "AN5516", "AN6000", "MA5800", "MA5608T",
+		"OLT", "ASR", "7600", "MX", "PTX", "VRP", "ROUTEROS", "IOS-XR", "JUNOS",
+		"BGP", "PPPOE", "VLAN", "MPLS", "OSPF", "FIBERHOME", "HUAWEI", "MIKROTIK", "CISCO", "DATACOM",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(upper, p) {
+			return true
+		}
+	}
+	return false
+}
+
