@@ -127,6 +127,64 @@ func (s *Service) PlanSubquestions(ctx context.Context, query string) []string {
 	return out
 }
 
+// AdaptiveInvestigationLead estabelece o contrato cognitivo:
+// research_question -> hypothesis -> search_lead -> evidence_gap -> next_action (P1-09)
+type AdaptiveInvestigationLead struct {
+	ResearchQuestion string `json:"research_question"`
+	Hypothesis       string `json:"hypothesis"`
+	SearchLead       string `json:"search_lead"`
+	EvidenceGap      string `json:"evidence_gap"`
+	NextAction       string `json:"next_action"`
+}
+
+// PlanAdaptiveLeads replaneja a investigação com base nas contradições, lacunas de firmware e nível de corroboração.
+func (s *Service) PlanAdaptiveLeads(ctx context.Context, query string, existingClaims []domain.Claim) []AdaptiveInvestigationLead {
+	var leads []AdaptiveInvestigationLead
+
+	for _, c := range existingClaims {
+		switch c.Status {
+		case "contested":
+			// Contradição detectada: formula hipótese de incompatibilidade entre releases
+			leads = append(leads, AdaptiveInvestigationLead{
+				ResearchQuestion: query,
+				Hypothesis:       fmt.Sprintf("A sintaxe ou procedimento para %s sofreu depreciação ou alteração entre releases", c.Title),
+				SearchLead:       fmt.Sprintf("%s syntax change deprecated release notes migration", query),
+				EvidenceGap:      "Conflito entre fontes ou aviso de comando obsoleto não resolvido por documento canônico da versão",
+				NextAction:       "Consultar notas de versão oficiais e manuais de migração do fabricante para datar a quebra de compatibilidade",
+			})
+		case "documented":
+			// Documento oficial encontrado, mas sem comprovação de firmware/modelo específico
+			leads = append(leads, AdaptiveInvestigationLead{
+				ResearchQuestion: query,
+				Hypothesis:       fmt.Sprintf("O comando é suportado oficialmente em %s, mas requer confirmação de versão mínima de OS", c.VendorName),
+				SearchLead:       fmt.Sprintf("%s %s release requirement minimum firmware compatibility", c.VendorName, query),
+				EvidenceGap:      "Ausência de especificação exata de modelo ou versão de firmware na evidência oficial coletada",
+				NextAction:       "Buscar matriz de compatibilidade de hardware e software do fabricante",
+			})
+		case "unconfirmed":
+			// Menos de 2 origens independentes
+			leads = append(leads, AdaptiveInvestigationLead{
+				ResearchQuestion: query,
+				Hypothesis:       fmt.Sprintf("Existem relatos de procedimento para %s, mas dependem de corroboração multi-origem", c.Title),
+				SearchLead:       fmt.Sprintf("%s configuration example practical guide forum ISP", query),
+				EvidenceGap:      "Apenas 1 origem ou réplicas do mesmo artigo (falta segunda fonte independente não-cópia)",
+				NextAction:       "Localizar discussão independente de operadores ou repositório de configuração real",
+			})
+		}
+	}
+
+	if len(leads) == 0 {
+		leads = append(leads, AdaptiveInvestigationLead{
+			ResearchQuestion: query,
+			Hypothesis:       fmt.Sprintf("Procedimento padrão documentado para %s", query),
+			SearchLead:       fmt.Sprintf("%s official guide configuration syntax", query),
+			EvidenceGap:      "Nenhuma claim formulada ainda para a consulta",
+			NextAction:       "Iniciar coleta exploratória a partir de seeds e metabusca",
+		})
+	}
+	return leads
+}
+
 type CommandProvenance struct {
 	Command string
 	Domain  string
@@ -264,6 +322,24 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 	for _, item := range checklist {
 		md.WriteString(fmt.Sprintf("- [ ] %s\n", item))
 	}
+	md.WriteString("\n")
+
+	// P1-09: Replanejamento cognitivo contínuo guiado por contradições e lacunas
+	adaptiveLeads := s.PlanAdaptiveLeads(ctx, campaign.Query, claims)
+	var domainLeads []domain.InvestigationLead
+	md.WriteString("## 8. Próximas Pistas Investigativas (Ciclo Adaptativo Guiado por Lacunas)\n\n")
+	md.WriteString("| Hipótese Técnica | Lacuna de Evidência Identificada | Próxima Ação Investigativa | Consulta de Descoberta |\n|---|---|---|---|\n")
+	for _, l := range adaptiveLeads {
+		domainLeads = append(domainLeads, domain.InvestigationLead{
+			ResearchQuestion: l.ResearchQuestion,
+			Hypothesis:       l.Hypothesis,
+			SearchLead:       l.SearchLead,
+			EvidenceGap:      l.EvidenceGap,
+			NextAction:       l.NextAction,
+		})
+		md.WriteString(fmt.Sprintf("| %s | %s | %s | `%s` |\n", l.Hypothesis, l.EvidenceGap, l.NextAction, l.SearchLead))
+	}
+	md.WriteString("\n")
 
 	return domain.InvestigationDossier{
 		Campaign:            campaign,
@@ -275,6 +351,7 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 		Warnings:            warnings,
 		RollbackPlan:        rollbackPlan,
 		LabChecklist:        checklist,
+		InvestigationLeads:  domainLeads,
 		Markdown:            md.String(),
 		GeneratedAt:         time.Now(),
 	}

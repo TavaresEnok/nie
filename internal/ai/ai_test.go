@@ -60,3 +60,33 @@ func TestGenerateInvestigationDossier(t *testing.T) {
 		t.Errorf("esperava RouterOS v7 na matriz, obteve %s", dossier.CompatibilityMatrix["MikroTik"])
 	}
 }
+
+func TestPlanAdaptiveLeads(t *testing.T) {
+	svc := NewService(Config{Provider: "none"})
+	claims := []domain.Claim{
+		{
+			Title:      "BGP Syntax",
+			VendorName: "Huawei",
+			Status:     "contested",
+		},
+		{
+			Title:      "RADIUS Accounting",
+			VendorName: "MikroTik",
+			Status:     "documented",
+		},
+	}
+
+	leads := svc.PlanAdaptiveLeads(context.Background(), "BGP RADIUS failover", claims)
+	if len(leads) != 2 {
+		t.Fatalf("esperava 2 pistas investigativas adaptativas, obteve %d", len(leads))
+	}
+
+	// Lead 1: Contradição -> deprecation/migration
+	if !strings.Contains(leads[0].SearchLead, "deprecated") {
+		t.Errorf("Pista de contradição deveria focar em deprecated/migration: %+v", leads[0])
+	}
+	// Lead 2: Documented sem firmware -> firmware compatibility
+	if !strings.Contains(leads[1].SearchLead, "firmware compatibility") {
+		t.Errorf("Pista de documentação sem firmware deveria focar em firmware compatibility: %+v", leads[1])
+	}
+}

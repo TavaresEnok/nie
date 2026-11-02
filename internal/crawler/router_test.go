@@ -142,3 +142,73 @@ func TestCrawl4AIBridgeLive(t *testing.T) {
 		t.Errorf("esperava RFC 4360 nas menções: %v", res.ExtractedMentions)
 	}
 }
+
+// TestRouterDynamicURLHeuristics (P1-01) valida a seleção automática e determinística
+// entre Native, Scrapy e Crawl4AI/Browser sem requisição manual de executor.
+func TestRouterDynamicURLHeuristics(t *testing.T) {
+	router := NewRouter()
+	native := &mockExecutor{name: "native"}
+	scrapy := &mockExecutor{name: "scrapy"}
+	crawl4ai := &mockExecutor{name: "crawl4ai"}
+
+	router.Register(native)
+	router.Register(scrapy)
+	router.Register(crawl4ai)
+
+	// 1. URL com SPA / dynamic hash -> Crawl4AI
+	t1 := domain.FetchTask{ID: "t1", URL: "https://support.huawei.com/#/dashboard/device"}
+	e1 := router.SelectExecutor(t1)
+	if e1.Name() != "crawl4ai" {
+		t.Errorf("Esperava crawl4ai para URL com hash SPA, obteve %s", e1.Name())
+	}
+
+	// 2. URL com catálogo de documentação técnica /docs/ -> Scrapy
+	t2 := domain.FetchTask{ID: "t2", URL: "https://wiki.mikrotik.com/docs/manual/routing-bgp"}
+	e2 := router.SelectExecutor(t2)
+	if e2.Name() != "scrapy" {
+		t.Errorf("Esperava scrapy para URL de documentação técnica /docs/, obteve %s", e2.Name())
+	}
+
+	// 3. URL padrão estática -> Native
+	t3 := domain.FetchTask{ID: "t3", URL: "https://example.org/about.html"}
+	e3 := router.SelectExecutor(t3)
+	if e3.Name() != "native" {
+		t.Errorf("Esperava native para URL estática simples, obteve %s", e3.Name())
+	}
+}
+
+// TestRawContentPreservationSeparatedFromDerived (P1-04) valida que os bytes originais (RawHTML)
+// são preservados em RawContent para cálculo de SHA-256 no CAS, e não o Markdown/texto derivado.
+func TestRawContentPreservationSeparatedFromDerived(t *testing.T) {
+	rawHTML := "<html><head><title>Original HTML</title></head><body><h1>Comandos OLT</h1></body></html>"
+	markdownDerived := "# Comandos OLT\n"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"effective_url": "https://example.com/olt-doc",
+			"status_code": 200,
+			"content_type": "text/markdown",
+			"markdown": "# Comandos OLT\n",
+			"raw_html": "<html><head><title>Original HTML</title></head><body><h1>Comandos OLT</h1></body></html>",
+			"extracted_links": ["https://example.com/next"]
+		}`))
+	}))
+	defer ts.Close()
+
+	bridge := NewCrawl4AIBridge(ts.URL, nil)
+	task := domain.FetchTask{ID: "c4ai-cas-test", URL: "https://example.com/olt-doc", Mode: "browser"}
+	res, err := bridge.Execute(context.Background(), task)
+	if err != nil {
+		t.Fatalf("erro no Crawl4AIBridge: %v", err)
+	}
+
+	// RawContent DEVE conter os bytes exatos do rawHTML recebido, preservando integridade CAS
+	if string(res.RawContent) != rawHTML {
+		t.Errorf("P1-04: RawContent não preservou o HTML original: obteve %q", string(res.RawContent))
+	}
+	// Text deve conter a representação derivada para busca/markdown
+	if res.Text != markdownDerived {
+		t.Errorf("P1-04: Text derivado incorreto: obteve %q", res.Text)
+	}
+}

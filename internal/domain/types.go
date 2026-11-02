@@ -245,18 +245,27 @@ type Claim struct {
 	Contradictions        []Contradiction `json:"contradictions,omitempty"`
 }
 
+type InvestigationLead struct {
+	ResearchQuestion string `json:"research_question"`
+	Hypothesis       string `json:"hypothesis"`
+	SearchLead       string `json:"search_lead"`
+	EvidenceGap      string `json:"evidence_gap"`
+	NextAction       string `json:"next_action"`
+}
+
 type InvestigationDossier struct {
-	Campaign            Campaign          `json:"campaign"`
-	Summary             string            `json:"summary"`
-	KeyFindings         []string          `json:"key_findings"`
-	Claims              []Claim           `json:"claims"`
-	CompatibilityMatrix map[string]string `json:"compatibility_matrix"`
-	CLICommands         []string          `json:"cli_commands"`
-	Warnings            []string          `json:"warnings"`
-	RollbackPlan        string            `json:"rollback_plan"`
-	LabChecklist        []string          `json:"lab_checklist"`
-	Markdown            string            `json:"markdown"`
-	GeneratedAt         time.Time         `json:"generated_at"`
+	Campaign            Campaign            `json:"campaign"`
+	Summary             string              `json:"summary"`
+	KeyFindings         []string            `json:"key_findings"`
+	Claims              []Claim             `json:"claims"`
+	CompatibilityMatrix map[string]string   `json:"compatibility_matrix"`
+	CLICommands         []string            `json:"cli_commands"`
+	Warnings            []string            `json:"warnings"`
+	RollbackPlan        string              `json:"rollback_plan"`
+	LabChecklist        []string            `json:"lab_checklist"`
+	InvestigationLeads  []InvestigationLead `json:"investigation_leads,omitempty"`
+	Markdown            string              `json:"markdown"`
+	GeneratedAt         time.Time           `json:"generated_at"`
 }
 
 // Fase 3: Autonomia, Agendamentos e Alertas
