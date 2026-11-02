@@ -13,6 +13,24 @@ type MentionPattern struct {
 }
 
 var mentionPatterns = []MentionPattern{
+	// Referências genéricas, válidas para qualquer assunto público (o vocabulário
+	// de telecom abaixo é uma especialização, não a base da descoberta).
+	{
+		Category: "cve",
+		Regexp:   regexp.MustCompile(`(?i)\bCVE-\d{4}-\d{4,7}\b`),
+	},
+	{
+		Category: "doi",
+		Regexp:   regexp.MustCompile(`\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+[A-Za-z0-9]`),
+	},
+	{
+		Category: "arxiv",
+		Regexp:   regexp.MustCompile(`(?i)\barXiv:\s?\d{4}\.\d{4,5}(?:v\d+)?\b`),
+	},
+	{
+		Category: "standard",
+		Regexp:   regexp.MustCompile(`\b(?:ISO(?:/IEC)?\s?\d{3,5}(?:-\d+)?(?::\d{4})?|IEC\s?\d{3,5}(?:-\d+)*|IEEE\s?\d{3,4}(?:\.\d+[a-z]*)*|ITU-T\s?[A-Z]\.\d{1,4}(?:\.\d+)?|NIST\s?SP\s?\d{3}-\d{1,3}[A-Z]?|ABNT\s?NBR\s?\d{3,5}(?:-\d+)?)\b`),
+	},
 	// RFCs e Especificações de Engenharia de Internet
 	{
 		Category: "rfc",

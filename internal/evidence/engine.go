@@ -331,7 +331,7 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 				claimStatement = "Comandos transacionais TL1 para cadastro, consulta e sinal óptico de ONUs"
 			default:
 				claimTitle = fmt.Sprintf("Configuração CLI: %s", firstCmd)
-				claimStatement = fmt.Sprintf("Comandos CLI validados para contexto %s", vendorName)
+				claimStatement = fmt.Sprintf("Comandos CLI citados nas fontes para o contexto %s (não validados)", vendorName)
 			}
 		} else if vendorName != "" {
 			claimTitle = fmt.Sprintf("%s — %s", vendorName, query)

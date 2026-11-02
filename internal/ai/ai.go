@@ -222,10 +222,23 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 
 	cliCommands = dedupe(cliCommands)
 
+	// Afirmações sem evidência suficiente nunca aparecem como conclusões: cada
+	// uma recebe uma advertência explícita, e o resumo diz quantas há.
+	supported, documented, insufficient, contested := 0, 0, 0, 0
 	for _, c := range claims {
 		keyFindings = append(keyFindings, fmt.Sprintf("[%s] %s: %s", strings.ToUpper(c.Status), c.Title, c.Statement))
-		if c.Status == "contested" {
+		switch c.Status {
+		case "contested":
+			contested++
 			warnings = append(warnings, fmt.Sprintf("Atenção: A configuração para '%s' possui evidências conflitantes ou relatos de incompatibilidade.", c.Title))
+		case "documented":
+			documented++
+			warnings = append(warnings, fmt.Sprintf("'%s' consta em documentação, mas a aplicabilidade ao modelo, firmware e recurso pedidos não foi comprovada.", c.Title))
+		case "sustained", "corroborated", "validated_lab":
+			supported++
+		default:
+			insufficient++
+			warnings = append(warnings, fmt.Sprintf("Evidência insuficiente: '%s' não tem documentação oficial nem origens independentes que a sustentem.", c.Title))
 		}
 	}
 
@@ -234,7 +247,12 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 		warnings = append(warnings, "Verifique se a versão de firmware/software em execução suporta as sintaxes especificadas.")
 	}
 
-	summary := fmt.Sprintf("Dossiê de investigação técnica para a consulta: '%s'. Foram analisadas %d passagens de evidência e consolidados %d claims técnicos.", campaign.Query, len(passages), len(claims))
+	summary := fmt.Sprintf("Dossiê de investigação técnica para a consulta: '%s'. Foram analisadas %d passagens de evidência e consolidados %d claims técnicos "+
+		"(%d sustentados ou corroborados, %d documentados sem aplicabilidade comprovada, %d sem evidência suficiente, %d contestados).",
+		campaign.Query, len(passages), len(claims), supported, documented, insufficient, contested)
+	if supported == 0 {
+		summary += " Nenhuma afirmação atingiu evidência suficiente para ser tratada como conclusão."
+	}
 
 	// Markdown synthesis
 	var md strings.Builder
@@ -303,14 +321,26 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 	}
 	md.WriteString("\n")
 
+	// Rollback e checklist são orientação genérica de redes, não extraída das
+	// evidências: só entram quando há fabricante de rede identificado.
+	networkContext := len(compatibilityMatrix) > 0
 	md.WriteString("## 6. Procedimento de Rollback Recomendado\n\n")
-	rollbackPlan := "Em caso de falha durante aplicação das configurações:\n" +
+	if networkContext {
+		md.WriteString("> Orientação genérica do NIE, **não extraída das evidências desta campanha**.\n\n")
+	} else {
+		md.WriteString("*Não aplicável: nenhum fabricante de rede identificado nas evidências.*\n\n")
+	}
+	rollbackPlan :="Em caso de falha durante aplicação das configurações:\n" +
 		"1. Mantenha console/OOB ativa antes de alterar tabelas de roteamento ou firewall.\n" +
 		"2. No Huawei VRP utilize 'undo <comando>' ou faça 'rollback configuration'.\n" +
 		"3. No MikroTik utilize o modo Safe Mode (Ctrl+X) antes de testar regras de BGP/filtros.\n" +
 		"4. No Cisco IOS-XR/XE utilize 'rollback configuration last 1' para restauração imediata.\n" +
 		"5. No Datacom DmOS utilize 'no <comando>' e confirme com 'show running-config'."
-	md.WriteString(rollbackPlan + "\n\n")
+	if networkContext {
+		md.WriteString(rollbackPlan + "\n\n")
+	} else {
+		rollbackPlan = ""
+	}
 
 	md.WriteString("## 7. Checklist de Validação em Laboratório\n\n")
 	checklist := []string{
@@ -318,6 +348,10 @@ func (s *Service) GenerateInvestigationDossier(ctx context.Context, campaign dom
 		"Verificar se licenças de recursos avançados (BNG, CGNAT, EVPN) estão ativas no chassi.",
 		"Validar compatibilidade de MTU e tabelas de adjacência antes de fechar peering BGP.",
 		"Testar contingência e comportamento de failover durante janela de manutenção autorizada.",
+	}
+	if !networkContext {
+		checklist = nil
+		md.WriteString("*Não aplicável: nenhum fabricante de rede identificado nas evidências.*\n")
 	}
 	for _, item := range checklist {
 		md.WriteString(fmt.Sprintf("- [ ] %s\n", item))

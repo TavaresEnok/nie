@@ -90,3 +90,30 @@ func TestPlanAdaptiveLeads(t *testing.T) {
 		t.Errorf("Pista de documentação sem firmware deveria focar em firmware compatibility: %+v", leads[1])
 	}
 }
+
+// TestDossierNeverPresentsInsufficientEvidenceAsConclusion cobre o critério de
+// qualidade: evidência conflitante ou insuficiente sempre gera advertência.
+func TestDossierNeverPresentsInsufficientEvidenceAsConclusion(t *testing.T) {
+	svc := NewService(Config{Provider: "none"})
+	camp := domain.Campaign{ID: "c1", Query: "efeitos colaterais da metformina"}
+	claims := []domain.Claim{
+		{Title: "Relato de fórum", Status: "unconfirmed", Applicability: "indeterminate"},
+		{Title: "Bula oficial", Status: "documented", Applicability: "indeterminate"},
+		{Title: "Interação contestada", Status: "contested", Applicability: "incompatible"},
+	}
+	d := svc.GenerateInvestigationDossier(context.Background(), camp, claims, nil)
+
+	joined := strings.Join(d.Warnings, "\n")
+	for _, title := range []string{"Relato de fórum", "Bula oficial", "Interação contestada"} {
+		if !strings.Contains(joined, title) {
+			t.Errorf("claim %q sem advertência; advertências: %v", title, d.Warnings)
+		}
+	}
+	if !strings.Contains(d.Summary, "Nenhuma afirmação atingiu evidência suficiente") {
+		t.Errorf("resumo deve dizer que não há conclusão sustentada: %q", d.Summary)
+	}
+	// Campanha fora de redes não recebe rollback/checklist de roteadores.
+	if d.RollbackPlan != "" || len(d.LabChecklist) != 0 || strings.Contains(d.Markdown, "Huawei VRP") {
+		t.Errorf("orientação de redes não deveria aparecer em campanha sem fabricante de rede")
+	}
+}

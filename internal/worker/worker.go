@@ -440,7 +440,7 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 			mentions := extract.ExtractMentions(ex.Text, 15)
 			for _, mention := range mentions {
 				_ = w.store.RecordDiscoveryEdge(ctx, job.CampaignID, finalNorm, "mention:"+mention, "mention", "menção técnica não linkada", job.Depth+1)
-				if isTechnicalTelecomKeyword(mention) {
+				if isSearchableMention(mention) {
 					if w.searx != nil {
 						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_web", mention)
 					} else if w.mwmbl != nil {
@@ -683,10 +683,19 @@ func computeFrontierPriority(link string, depth int, campaignQuery string) int {
 	return score
 }
 
-func isTechnicalTelecomKeyword(m string) bool {
+// isSearchableMention decide se uma menção sem link vira nova consulta de
+// descoberta. Referências genéricas (CVE, DOI, arXiv, normas) valem para
+// qualquer assunto; os prefixos de telecom são a especialização inicial.
+func isSearchableMention(m string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(m))
 	if len(upper) < 3 {
 		return false
+	}
+	generic := []string{"CVE-", "ARXIV:", "ISO", "IEC", "IEEE", "ITU-T", "NIST", "ABNT", "10."}
+	for _, p := range generic {
+		if strings.HasPrefix(upper, p) {
+			return true
+		}
 	}
 	// Prefixos de telecom / infraestrutura
 	prefixes := []string{

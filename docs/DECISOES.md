@@ -98,3 +98,26 @@ coletado é não confiável: o modelo não recebe ferramentas, segredos nem
 capacidade de execução. O ganho da IA ainda precisa ser medido no benchmark
 de 20 perguntas (`internal/benchmark/20_perguntas_telecom.json`) antes de ser
 declarado.
+
+## ADR-009 — Arquitetura genérica; telecom como especialização
+
+**Status:** aceito (implementação parcial)  
+**Contexto:** o objetivo original é investigar qualquer assunto público; redes
+e ISPs são a especialização inicial. Se a descoberta depender de termos como
+fabricante, BGP ou firmware, o NIE vira apenas um buscador de telecom.  
+**Decisão:** fila, coleta, CAS, busca, menções sem link e dossiê devem
+funcionar para qualquer tema. O vocabulário de telecom entra como camada
+adicional, nunca como condição para a descoberta.  
+**Estado em 02/11/2026:**
+- genérico e testado: menções de CVE, DOI, arXiv e normas (ISO, IEC, IEEE,
+  ITU-T, NIST, ABNT) geram novas consultas (`internal/worker/worker_test.go`);
+  priorização da fronteira usa os termos da própria campanha; o dossiê omite
+  rollback/checklist de redes quando não há fabricante de rede;
+- ainda específico de telecom: `internal/classifier`, `evidence.ParseRequirements`
+  (requisitos de fabricante, modelo, firmware e recurso) e os padrões de
+  modelos e protocolos em `internal/extract/mentions.go`. Fora de telecom, o
+  motor de evidências não extrai requisitos e as afirmações ficam
+  `documented`/`unconfirmed` com aplicabilidade `indeterminate`.  
+**Consequências:** um benchmark fora de telecom deve integrar a validação de
+ponta a ponta. Tornar os requisitos do motor de evidências configuráveis por
+domínio é trabalho pendente.

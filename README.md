@@ -28,12 +28,14 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 | **Limites de recursos dos workers** | Configurado, não validado | `mem_limit`, `cpus`, `pids_limit`, `no-new-privileges` no `docker-compose.yml` |
 | **Roteamento entre executores** (P1-01) | Testado (heurística) | Escolha por padrões de URL (`/app/`, `/docs/`…); não detecta páginas JS por conteúdo |
 | **Sitemap / RSS / Atom** | Testado | `internal/extract/feed.go`: `urlset`, `sitemapindex`, RSS, Atom e `<link rel="alternate">`; arestas `sitemap`/`feed`. Sitemaps do `robots.txt` ainda não são lidos |
-| **Menções sem link** | Testado (unidade) | `internal/extract/mentions.go` gera consultas de descoberta |
-| **Priorização da fronteira** (P1-05) | Sem teste | `computeFrontierPriority` em `internal/worker/worker.go` |
+| **Menções sem link** | Testado (unidade) | `internal/extract/mentions.go`: referências genéricas (CVE, DOI, arXiv, ISO/IEC/IEEE/ITU-T/NIST/ABNT) e vocabulário de telecom geram consultas de descoberta |
+| **Priorização da fronteira** (P1-05) | Testado (unidade) | `computeFrontierPriority`: termos da campanha antes, páginas de ruído (login, share…) depois |
 | **Origin clustering** (P1-06) | Testado (unidade) | Fingerprint de conteúdo; cópias idênticas = 1 origem. `RecordOriginCluster` não é chamado pelo fluxo |
 | **Ciclo adaptativo de pistas** | Parcial | Pistas vão para a fila (com orçamento e dedupe) só quando `POST /api/campaigns/{id}/investigate` é chamado; não há rodada automática |
 | **Git Eye** (P1-07) | Parcial | Busca de repositórios GitHub + READMEs e varredura de Git local com SHA; sem busca por conteúdo remoto, GitLab ou Zoekt |
 | **Links em PDFs** (P1-08) | Testado (unidade) | URLs encontradas no texto; anotações de link embutidas no PDF não são lidas |
+| **Dossiê** | Testado (unidade) | Toda afirmação contestada, só documentada ou sem evidência suficiente recebe advertência; o resumo informa quando nenhuma conclusão é sustentada |
+| **Arquitetura genérica** (ADR-009) | Parcial | Descoberta e dossiê funcionam fora de telecom; classificador e requisitos do motor de evidências ainda são de telecom |
 | **Benchmark de 20 perguntas** | Testado com fixtures sintéticas | Mede o avaliador, não a pesquisa real na internet |
 | **SearXNG** | Configurado | `config/searxng/settings.yml` (JSON); resultados reais não testados |
 | **OCR** | Não integrado | `internal/extract/ocr.go` existe, mas o pipeline não o chama |
