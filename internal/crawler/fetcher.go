@@ -145,6 +145,12 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Response, error) {
 // requisição (maxBytes > 0), além dos limites por tipo de documento. É o que
 // aplica o saldo do orçamento da campanha no executor nativo.
 func (f *Fetcher) FetchWithLimit(ctx context.Context, rawURL string, maxBytes int64) (*Response, error) {
+	return f.FetchConditional(ctx, rawURL, maxBytes, "", "")
+}
+
+// FetchConditional envia If-None-Match e If-Modified-Since quando a campanha
+// já observou a URL. 304 devolve cabeçalhos e nenhum corpo.
+func (f *Fetcher) FetchConditional(ctx context.Context, rawURL string, maxBytes int64, noneMatch, modifiedSince string) (*Response, error) {
 	u, _, err := urlutil.ParseNormalized(rawURL)
 	if err != nil {
 		return nil, err
@@ -163,12 +169,22 @@ func (f *Fetcher) FetchWithLimit(ctx context.Context, rawURL string, maxBytes in
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown;q=0.9,application/xml,text/xml,application/rss+xml,application/atom+xml;q=0.8,*/*;q=0.1")
 	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8")
 	req.Header.Set("From", "nie@localhost")
+	if noneMatch != "" {
+		req.Header.Set("If-None-Match", noneMatch)
+	}
+	if modifiedSince != "" {
+		req.Header.Set("If-Modified-Since", modifiedSince)
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotModified {
+		return &Response{URL: resp.Request.URL.String(), StatusCode: resp.StatusCode, Header: resp.Header}, nil
+	}
 
 	contentType := resp.Header.Get("Content-Type")
 	limit := f.limitFor(contentType)

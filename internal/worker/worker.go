@@ -19,7 +19,9 @@ import (
 	"nie/internal/crawler"
 	"nie/internal/discovery"
 	"nie/internal/domain"
+	"nie/internal/evidence"
 	"nie/internal/extract"
+	"nie/internal/research"
 	"nie/internal/storage"
 	"nie/internal/store"
 	"nie/internal/urlutil"
@@ -30,12 +32,16 @@ type Worker struct {
 	storage *storage.Store
 	fetcher *crawler.Fetcher
 	router  *crawler.Router
-	robots  *crawler.Robots
+	robots  interface {
+		Allowed(context.Context, *url.URL) bool
+	}
 	searx   *discovery.SearXNG
 	github  *discovery.GitHub
+	gitlab  *discovery.GitLab
 	mwmbl   *discovery.Mwmbl
 	wayback *discovery.WaybackMachine
 	swh     *discovery.SoftwareHeritage
+	crawl   *discovery.CommonCrawl
 	cfg     config.Config
 	logger  *slog.Logger
 }
@@ -53,6 +59,9 @@ func (e *jobError) Unwrap() error { return e.err }
 
 func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robots *crawler.Robots,
 	searx *discovery.SearXNG, github *discovery.GitHub, cfg config.Config, logger *slog.Logger) *Worker {
+	if st != nil && cfg.AutomaticResearch {
+		st.ConfigureAutomaticResearch(cfg.MaxResearchRounds)
+	}
 
 	// Redirecionamentos também precisam respeitar o robots.txt do destino final.
 	if robots != nil && fetcher != nil {
@@ -92,6 +101,11 @@ func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robo
 	if cfg.SoftwareHeritageEnabled {
 		swh = discovery.NewSoftwareHeritage()
 	}
+	crawl := discovery.NewCommonCrawl(cfg.CommonCrawlIndex, cfg.CommonCrawlEnabled)
+	gitlab := discovery.NewGitLab(cfg.GitLabURL, cfg.GitLabToken, cfg.GitLabEnabled)
+	if cfg.GitLabEnabled {
+		logger.Info("descoberta GitLab habilitada", "url", cfg.GitLabURL, "token", cfg.GitLabToken != "")
+	}
 
 	return &Worker{
 		store:   st,
@@ -101,9 +115,11 @@ func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robo
 		robots:  robots,
 		searx:   searx,
 		github:  github,
+		gitlab:  gitlab,
 		mwmbl:   mwmbl,
 		wayback: wayback,
 		swh:     swh,
+		crawl:   crawl,
 		cfg:     cfg,
 		logger:  logger,
 	}
@@ -148,7 +164,7 @@ func (w *Worker) reapLoop(ctx context.Context) {
 		if n, err := w.store.FinishIdleCampaigns(ctx); err != nil {
 			w.logger.Error("finalizar campanhas ociosas", "err", err)
 		} else if n > 0 {
-			w.logger.Info("campanhas concluídas", "count", n)
+			w.logger.Info("campanhas ociosas avaliadas", "count", n)
 		}
 		select {
 		case <-ctx.Done():
@@ -174,34 +190,36 @@ func (w *Worker) loop(ctx context.Context, id int) {
 			continue
 		}
 		w.logger.Info("job recebido", "worker", id, "job", job.ID, "kind", job.Kind, "url", job.URL, "depth", job.Depth, "attempt", job.Attempts)
-		err = w.process(ctx, job)
+		err = w.processWithLease(ctx, job)
 		switch {
 		case err == nil:
-			if err := w.store.CompleteJob(ctx, job.ID); err != nil {
+			if err := w.store.CompleteClaimedJob(ctx, job); err != nil {
 				w.logger.Error("completar job", "job", job.ID, "err", err)
 			}
 		case errors.Is(err, errDeferred):
 			// O job já foi reagendado pelo throttle.
+		case errors.Is(err, store.ErrLeaseLost):
+			w.logger.Warn("execução interrompida após perda de lease", "job", job.ID)
 		default:
 			var je *jobError
 			if errors.As(err, &je) {
 				if je.permanent || job.Attempts >= job.MaxAttempts {
 					w.logger.Warn("job encerrado", "job", job.ID, "url", job.URL, "err", err)
-					_ = w.store.DeadJob(ctx, job.ID, err)
+					_ = w.store.DeadClaimedJob(ctx, job, err)
 				} else {
 					delay := je.retryAfter
 					if delay <= 0 {
 						delay = backoff(job.Attempts)
 					}
 					w.logger.Warn("job reagendado", "job", job.ID, "url", job.URL, "delay", delay, "err", err)
-					_ = w.store.RetryJob(ctx, job.ID, delay, err)
+					_ = w.store.RetryClaimedJob(ctx, job, delay, err)
 				}
 			} else {
 				w.logger.Warn("job falhou", "job", job.ID, "url", job.URL, "err", err)
 				if job.Attempts >= job.MaxAttempts {
-					_ = w.store.DeadJob(ctx, job.ID, err)
+					_ = w.store.DeadClaimedJob(ctx, job, err)
 				} else {
-					_ = w.store.RetryJob(ctx, job.ID, backoff(job.Attempts), err)
+					_ = w.store.RetryClaimedJob(ctx, job, backoff(job.Attempts), err)
 				}
 			}
 		}
@@ -211,21 +229,122 @@ func (w *Worker) loop(ctx context.Context, id int) {
 	}
 }
 
+func (w *Worker) processWithLease(parent context.Context, job *domain.Job) error {
+	return w.processWithLeaseTiming(parent, job, 30*time.Second, 2*time.Minute)
+}
+
+func (w *Worker) processWithLeaseTiming(parent context.Context, job *domain.Job, interval, lease time.Duration) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	done := make(chan struct{})
+	lost := make(chan error, 1)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(ctx, 10*time.Second)
+				err := w.store.RenewClaimedJob(renewCtx, job, lease)
+				renewCancel()
+				if err != nil && ctx.Err() == nil {
+					lost <- errors.Join(store.ErrLeaseLost, err)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := w.process(ctx, job)
+	cancel()
+	<-done
+	select {
+	case leaseErr := <-lost:
+		return leaseErr
+	default:
+		return err
+	}
+}
+
 func (w *Worker) process(ctx context.Context, job *domain.Job) error {
 	switch job.Kind {
-	case "fetch":
+	case "fetch", "revisit":
 		return w.processFetch(ctx, job)
+	case "investigate":
+		return w.processResearch(ctx, job)
 	case "discover_web":
 		return w.processSearX(ctx, job)
 	case "discover_github":
 		return w.processGitHub(ctx, job)
+	case "discover_gitlab":
+		return w.processGitLab(ctx, job)
 	case "discover_mwmbl":
 		return w.processMwmbl(ctx, job)
 	case "discover_swh":
 		return w.processSoftwareHeritage(ctx, job)
+	case "discover_commoncrawl":
+		return w.processCommonCrawl(ctx, job)
 	default:
 		return &jobError{err: fmt.Errorf("kind desconhecido: %s", job.Kind), permanent: true}
 	}
+}
+
+func (w *Worker) processResearch(ctx context.Context, job *domain.Job) error {
+	var payload struct {
+		Round int `json:"round"`
+	}
+	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Round < 1 {
+		return &jobError{err: errors.New("rodada inválida"), permanent: true}
+	}
+	camp, err := w.store.GetCampaign(ctx, job.CampaignID)
+	if err != nil {
+		return err
+	}
+	passages, err := research.RetrievePassages(ctx, w.store, camp.Query, camp.ID, 100)
+	if err != nil {
+		return err
+	}
+	claims := evidence.NewEngine().BuildClaimsFromPassages(camp.ID, camp.Query, passages)
+	if err := w.store.SaveClaims(ctx, claims); err != nil {
+		return err
+	}
+	searched, err := w.store.ListDiscoveryQueries(ctx, camp.ID)
+	if err != nil {
+		return err
+	}
+	// O decisor é determinístico: indisponibilidade de LLM não interrompe a fila.
+	// Lacunas de claims têm prioridade; subperguntas só entram quando elas fecham.
+	plan := research.PlanRound(ctx, camp.Query, claims, passages, searched)
+	round := store.ResearchRound{Number: payload.Round, Decision: plan.Decision, Reason: plan.Reason, ClaimsCount: len(claims), PassagesCount: len(passages)}
+	for _, question := range plan.Questions {
+		round.Questions = append(round.Questions, store.ResearchQuestion{
+			Ordinal: question.Ordinal, Text: question.Text, Origin: question.Origin, Status: question.Status, EvidenceNote: question.EvidenceNote,
+		})
+	}
+	kinds, err := w.store.CampaignDiscoveryKinds(ctx, camp.ID)
+	if err != nil {
+		return err
+	}
+	var available []string
+	for _, kind := range kinds {
+		if (kind == "discover_web" && w.searx != nil) || (kind == "discover_mwmbl" && w.mwmbl != nil) || (kind == "discover_github" && w.github != nil) || (kind == "discover_gitlab" && w.gitlab != nil) || (kind == "discover_swh" && w.swh != nil) || (kind == "discover_commoncrawl" && w.crawl != nil) {
+			available = append(available, kind)
+		}
+	}
+	if len(available) == 0 {
+		round.Decision, round.Reason = "stop", "no_discovery_provider"
+	}
+	for _, lead := range plan.Leads {
+		for _, kind := range available {
+			if kind != "" {
+				round.Leads = append(round.Leads, store.ResearchQuery{Kind: kind, Query: lead.Query, Reason: lead.Reason})
+			}
+		}
+	}
+	return w.store.CommitResearchRound(ctx, job, round)
 }
 
 func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
@@ -254,7 +373,7 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		return err
 	}
 	if !ok {
-		if err := w.store.DeferJob(ctx, job.ID, next); err != nil {
+		if err := w.store.DeferClaimedJob(ctx, job, next); err != nil {
 			return err
 		}
 		return errDeferred
@@ -290,18 +409,39 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 	}
 	if granted <= 0 {
 		// Saldo ocupado por downloads em andamento: tenta de novo depois, sem perder a URL.
-		if err := w.store.DeferJob(ctx, job.ID, time.Now().Add(30*time.Second)); err != nil {
+		if err := w.store.DeferClaimedJob(ctx, job, time.Now().Add(30*time.Second)); err != nil {
 			return err
 		}
 		return errDeferred
 	}
-	defer func() { _ = w.store.ReleaseBytes(context.Background(), reservationID) }()
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = w.store.ReleaseBytes(releaseCtx, reservationID)
+	}()
 	perDocument = granted
 
 	task := crawler.BuildFetchTask(job.CampaignID, norm, mode, executor, perDocument)
+	if job.Kind == "revisit" {
+		obs, ok, err := w.store.LatestObservation(ctx, job.CampaignID, norm)
+		if err != nil {
+			return err
+		}
+		if ok {
+			task.IfNoneMatch = obs.ETag
+			task.IfModifiedSince = obs.LastModified
+		}
+	}
 	fetchResult, err := w.router.Execute(ctx, task)
 	if err != nil {
 		return classifyFetchError(err)
+	}
+	if fetchResult.StatusCode == 304 {
+		if err := w.store.TouchObservation(ctx, job.CampaignID, norm, fetchResult.ETag, fetchResult.LastModified); err != nil {
+			return err
+		}
+		w.logger.Info("revisita sem alteração", "url", norm)
+		return nil
 	}
 	if fetchResult.StatusCode < 200 || fetchResult.StatusCode >= 300 {
 		if (fetchResult.StatusCode == 404 || fetchResult.StatusCode == 410) && w.wayback != nil && w.cfg.WaybackEnabled {
@@ -345,12 +485,15 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		return nil
 	}
 
+	parserConfig := map[string]any{"rendered": len(fetchResult.RenderedContent) > 0}
 	var ex extract.Result
 	if passagesRaw, ok := fetchResult.Metadata["passages"].([]extract.Passage); ok && len(passagesRaw) > 0 {
 		ex.Text = fetchResult.Text
 		ex.Title = fetchResult.Title
 		ex.Links = fetchResult.ExtractedLinks
 		ex.Passages = passagesRaw
+		ex.Parser, _ = fetchResult.Metadata["parser"].(string)
+		ex.ParserVersion, _ = fetchResult.Metadata["parser_version"].(string)
 		if mimeStr, ok := fetchResult.Metadata["mime"].(string); ok {
 			ex.MIME = mimeStr
 		}
@@ -377,9 +520,25 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		default:
 			ex, err = extract.Text(rawBytes)
 		}
+		if err != nil && w.cfg.DoclingCommand != "" {
+			ex, err = extract.RunCommand(ctx, "docling", w.cfg.DoclingCommand, nil, rawBytes, 45*time.Second)
+		}
+		if err != nil && w.cfg.TikaCommand != "" {
+			ex, err = extract.RunCommand(ctx, "tika", w.cfg.TikaCommand, []string{"-t"}, rawBytes, 45*time.Second)
+		}
 		if err != nil {
-			// O original válido não se perde por falha de extração (ex.: PDF
-			// escaneado ou protegido): fica no CAS para reprocessamento.
+			// OCR é opcional e só recebe PDFs que falharam na extração básica.
+			if w.cfg.OCREnabled && strings.HasPrefix(fetchResult.ContentType, "application/pdf") {
+				ocr := extract.NewOCRServiceWithConfig(extract.OCRConfig{MaxPages: w.cfg.OCRMaxPages, Language: w.cfg.OCRLanguage, Timeout: w.cfg.OCRProcessingTimeout()})
+				ex, err = ocr.ExtractBytes(ctx, rawBytes, "application/pdf")
+				settings := ocr.Settings()
+				parserConfig["ocr_language"] = settings.Language
+				parserConfig["ocr_max_pages"] = settings.MaxPages
+				parserConfig["ocr_max_dimension"] = settings.MaxDimension
+			}
+		}
+		if err != nil {
+			// Falhas não descartam o original: ele fica disponível para reprocessar.
 			return w.preserveUnextracted(ctx, job, norm, finalNorm, rawBytes, fetchResult, err.Error())
 		}
 	}
@@ -396,17 +555,29 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 	if err != nil {
 		return err
 	}
+	inputSHA := stored.SHA256
+	if len(fetchResult.RenderedContent) > 0 {
+		rendered, err := w.storage.Put(fetchResult.RenderedContent)
+		if err != nil {
+			return err
+		}
+		inputSHA = rendered.SHA256
+	}
 	passages := make([]domain.Passage, 0, len(ex.Passages))
 	for _, p := range ex.Passages {
 		passages = append(passages, domain.Passage{Ordinal: p.Ordinal, Page: p.Page, Text: p.Text})
 	}
-	docID, created, err := w.store.RecordDocument(ctx, store.DocumentRecord{
-		SHA256: stored.SHA256,
-		MIME:   ex.MIME,
-		Title:  ex.Title,
-		Size:   stored.Size,
-		Text:   ex.Text,
+	saved, err := w.store.SaveDocument(ctx, store.DocumentRecord{
+		Parser: ex.Parser, ParserVersion: ex.ParserVersion,
+		ExtractionInputSHA256: inputSHA,
+		ParserConfig:          parserConfig,
+		SHA256:                stored.SHA256,
+		MIME:                  ex.MIME,
+		Title:                 ex.Title,
+		Size:                  stored.Size,
+		Text:                  ex.Text,
 		Metadata: map[string]any{
+			"content_type":    fetchResult.ContentType,
 			"requested_url":   norm,
 			"final_url":       finalNorm,
 			"passages":        len(passages),
@@ -426,7 +597,13 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 	if err != nil {
 		return err
 	}
-	w.logger.Info("documento processado", "url", finalNorm, "doc", docID, "sha256", stored.SHA256, "created", created, "passages", len(passages), "bytes", stored.Size)
+	if saved.Changed {
+		if err := w.store.ReevaluateAfterChange(ctx, job.CampaignID); err != nil {
+			return err
+		}
+		w.logger.Info("documento alterado", "url", finalNorm, "anterior", saved.PreviousSHA, "atual", stored.SHA256)
+	}
+	w.logger.Info("documento processado", "url", finalNorm, "doc", saved.ID, "sha256", stored.SHA256, "created", saved.Created, "passages", len(passages), "bytes", stored.Size)
 
 	if job.Depth < budget.MaxDepth {
 		enqueued := 0
@@ -541,6 +718,69 @@ func (w *Worker) processGitHub(ctx context.Context, job *domain.Job) error {
 	return nil
 }
 
+func (w *Worker) processGitLab(ctx context.Context, job *domain.Job) error {
+	if w.gitlab == nil {
+		w.logger.Info("descoberta GitLab não configurada; job ignorado")
+		return nil
+	}
+	var payload struct {
+		Query string `json:"query"`
+	}
+	_ = json.Unmarshal(job.Payload, &payload)
+	query := discovery.SanitizeQuery(payload.Query)
+	if query == "" {
+		return &jobError{err: errors.New("query GitLab vazia"), permanent: true}
+	}
+	results, err := w.gitlab.SearchReadmes(ctx, query, 5)
+	if err != nil {
+		return err
+	}
+	enqueued := 0
+	for _, r := range results {
+		ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, r.URL, 0, "", "gitlab", 15)
+		if err != nil {
+			w.logger.Warn("enfileirar README GitLab", "url", r.URL, "err", err)
+			continue
+		}
+		if ok {
+			enqueued++
+		}
+	}
+	w.logger.Info("descoberta GitLab", "query", query, "results", len(results), "enqueued", enqueued)
+	return nil
+}
+
+func (w *Worker) processCommonCrawl(ctx context.Context, job *domain.Job) error {
+	if w.crawl == nil {
+		w.logger.Info("Common Crawl não configurado; job ignorado")
+		return nil
+	}
+	var payload struct {
+		Query string `json:"query"`
+	}
+	_ = json.Unmarshal(job.Payload, &payload)
+	if strings.TrimSpace(payload.Query) == "" {
+		return &jobError{err: errors.New("consulta Common Crawl vazia"), permanent: true}
+	}
+	results, err := w.crawl.Search(ctx, payload.Query, 5)
+	if err != nil {
+		return err
+	}
+	enqueued := 0
+	for _, r := range results {
+		ok, err := w.store.EnqueueFetch(ctx, job.CampaignID, r.URL, 0, "", "commoncrawl", 25)
+		if err != nil {
+			w.logger.Warn("enfileirar Common Crawl", "url", r.URL, "err", err)
+			continue
+		}
+		if ok {
+			enqueued++
+		}
+	}
+	w.logger.Info("descoberta Common Crawl", "query", payload.Query, "results", len(results), "enqueued", enqueued)
+	return nil
+}
+
 func (w *Worker) processMwmbl(ctx context.Context, job *domain.Job) error {
 	if w.mwmbl == nil {
 		w.logger.Info("descoberta Mwmbl não configurada; job ignorado")
@@ -638,7 +878,7 @@ func (w *Worker) preserveUnextracted(ctx context.Context, job *domain.Job, reque
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	if _, _, err := w.store.RecordDocument(ctx, store.DocumentRecord{
+	saved, err := w.store.SaveDocument(ctx, store.DocumentRecord{
 		SHA256: stored.SHA256,
 		MIME:   mime,
 		Size:   stored.Size,
@@ -656,8 +896,14 @@ func (w *Worker) preserveUnextracted(ctx context.Context, job *domain.Job, reque
 		StatusCode:    fr.StatusCode,
 		ETag:          fr.ETag,
 		LastModified:  fr.LastModified,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
+	}
+	if saved.Changed {
+		if err := w.store.ReevaluateAfterChange(ctx, job.CampaignID); err != nil {
+			return err
+		}
 	}
 	w.logger.Warn("documento preservado sem texto extraído", "url", final, "sha256", stored.SHA256, "motivo", reason)
 	return nil

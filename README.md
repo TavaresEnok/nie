@@ -31,7 +31,7 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 | **Menções sem link** | Testado (unidade) | `internal/extract/mentions.go`: referências genéricas (CVE, DOI, arXiv, ISO/IEC/IEEE/ITU-T/NIST/ABNT) e vocabulário de telecom geram consultas de descoberta |
 | **Priorização da fronteira** (P1-05) | Testado (unidade) | `computeFrontierPriority`: termos da campanha antes, páginas de ruído (login, share…) depois |
 | **Origin clustering** (P1-06) | Testado com PostgreSQL 16 | Fingerprint de conteúdo persistido em `origin_clusters`; evidências gravam `cluster_id`, que sobrevive ao recarregamento. Fingerprint idêntico = 1 origem; independência real de autoria não é inferida |
-| **Ciclo adaptativo de pistas** | Parcial | Pistas entram na fila com dedupe por campanha+provedor+consulta, reabrem campanha concluída e rodam (teste com PostgreSQL 16). Continua disparado por `POST /api/campaigns/{id}/investigate`; não há rodada automática, critério de parada nem uso de LLM no fluxo (`PlanSubquestions` não é chamado) |
+| **Ciclo adaptativo de pistas** | Implementado e testado com descoberta HTTP controlada; sem E2E público | Fila ociosa agenda avaliação persistente. Lacunas de claims geram buscas primeiro; quando elas fecham, a rodada envia subperguntas determinísticas ainda não pesquisadas (`PlanSubquestions`, sem LLM no ciclo). Cobertura por termos no mesmo trecho não certifica a resposta. Histórico em `/api/campaigns/{id}/rounds` e subperguntas em `/api/campaigns/{id}/questions`. |
 | **Git Eye** (P1-07) | Parcial | Varredura local com proveniência verdadeira: `Revision` só é um SHA se o trecho existe no blob daquele commit; alteração não commitada ou arquivo não rastreado vem como `working_tree`/`uncommitted`/`dirty` com `base_revision`. Busca de repositórios e READMEs no GitHub; sem busca por conteúdo remoto, GitLab ou Zoekt |
 | **Claims idempotentes** | Testado com PostgreSQL 16 | Índice único (campanha, título). A migração 0006 **mescla** duplicatas antigas no claim validado (ou no mais antigo): evidências e contradições são movidas, nada é apagado, e cada fusão fica em `claim_merges`. Upsert seguro sob concorrência; claims com validação operacional são imutáveis |
 | **robots.txt** | Testado (unidade + servidor local) | RFC 9309: robots.txt inalcançável bloqueia por 1 min; 404/410 libera; 5xx bloqueia. Cada redirecionamento é conferido contra o robots.txt do destino; o redirecionamento do próprio robots.txt não reentra na verificação |
@@ -270,6 +270,14 @@ curl http://127.0.0.1:8080/api/documents/ID
 ```
 
 ## Como o fluxo funciona
+
+Ao esvaziar a fila, `NIE_AUTOMATIC_RESEARCH=true` agenda a avaliação das evidências
+e permite buscas derivadas das lacunas encontradas. `NIE_MAX_RESEARCH_ROUNDS=3`
+limita o total de avaliações, incluindo a final (máximo aceito: 10; zero desativa).
+O histórico de decisões fica na campanha e em `GET /api/campaigns/{id}/rounds`.
+Nenhuma lacuna detectada significa somente que as regras atuais não propuseram
+outra busca; não comprova cobertura completa do assunto. Veja
+[o registro de execução do Plano V3](docs/EXECUCAO_PLANO_V3.md).
 
 1. A criação da campanha grava seeds como jobs `fetch` e, opcionalmente, jobs de
    descoberta.

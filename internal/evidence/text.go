@@ -58,7 +58,28 @@ var (
 		`|\bsin soporte\b)`)
 
 	// Palavras que declaram a obsolescência ou erro do procedimento.
-	refuteKeywordRE = regexp.MustCompile(`(?i)\b(deprecated|obsolete|obsoleto|obsoleta|descontinuad[oa]|syntax error|incompatible|incompatível|incompativel)\b`)
+	refuteKeywordRE = regexp.MustCompile(`(?i)\b(deprecated|obsolete|obsolet[oa]|descontinuad[oa]|syntax error|incompatible|incompatível|incompativel)\b`)
+
+	// Negação passiva (o recurso aparece ANTES do predicado negativo).
+	passiveNegationRE = regexp.MustCompile(`(?i)(` +
+		`\b(?:is not|isn't|are not|aren't|was not|were not|cannot be|can not be|can't be|could not be|will not be|won't be)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:supported|available|applicable|allowed|possible|compatible|implemented|enabled|configured|configurable)\b` +
+		`|\b(?:is|are|was|were)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:unsupported|deprecated|obsolete|incompatible)\b` +
+		`|\b(?:não|nao|nunca|jamais)\s+(?:é|e|são|sao|está|esta|estão|estao|foi|foram|pode ser|podem ser)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:suportad\p{L}+|disponível|disponivel|compatível|compativel|implementad\p{L}+|configurad\p{L}+|permitid\p{L}+|obsolet\p{L}+|descontinuad\p{L}+|incompatível|incompativel)\b` +
+		`|\b(?:é|e|são|sao|está|esta)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:obsolet[oa]s?|descontinuad[oa]s?|incompatível|incompativel)\b` +
+		`|\bno\s+(?:es|son|está|esta|están|estan|puede ser|pueden ser)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:soportad\p{L}+|admitid\p{L}+|disponibles?|compatibles?|implementad\p{L}+|configurad\p{L}+|obsolet\p{L}+)\b` +
+		`|\b(?:es|son|está|esta)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:obsolet[oa]s?|incompatibles?)\b)`)
+
+	// Negação ativa ou preposicional (o recurso negado aparece DEPOIS do marcador).
+	activeNegationRE = regexp.MustCompile(`(?i)(` +
+		`\b(?:does not|doesn't|do not|don't|did not|cannot|can not|can't|could not|will not|won't|never)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:support|supports|allow|allows|enable|enables|implement|implements|work|works|configure|have|provide)\b` +
+		`|\b(?:lacks?|lacking|without(?:\s+support\s+for)?|no\s+support\s+for|not\s+supporting)\b` +
+		`|\b(?:não|nao|nunca|jamais)\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:suporta\p{L}*|permite\p{L}*|implementa\p{L}*|funciona\p{L}*|configura\p{L}*|possui|tem|oferece)\b` +
+		`|\b(?:sem(?:\s+suporte\s+(?:a|ao|para))?|não há suporte(?:\s+(?:a|ao|para))?|nao ha suporte(?:\s+(?:a|ao|para))?)\b` +
+		`|\bno\s+(?:[\p{L}\p{N}-]+\s+){0,2}?(?:soporta\p{L}*|admite\p{L}*|permite\p{L}*|funciona\p{L}*|implementa\p{L}*|configura\p{L}*)\b` +
+		`|\b(?:sin(?:\s+soporte(?:\s+para)?)?)\b)`)
+
+	// Marcadores explícitos de conflito/divergência documental no próprio trecho.
+	conflictMarkerRE = regexp.MustCompile(`(?i)\b(conflict(?:ing|s)?|contradict(?:ory|ing|s|ion)?|disputed|inconclusive|conflit(?:o|ante|antes)|contradit[óo]ri[oa]s?|diverg(?:em|ente|entes|ência|encia)|inconclusiv[oa]|en conflicto|contradictori[oa]s?)\b`)
 
 	// Enunciados condicionais ou parciais: não sustentam o recurso por inteiro.
 	qualifiedRE = regexp.MustCompile(`(?i)\b(only|except|unless|limited to|partial|partially|provided that|as long as|depending on|apenas|somente|exceto|salvo|limitad[oa]|parcial|parcialmente|desde que|dependendo|solo|únicamente|excepto|siempre que)\b`)

@@ -11,10 +11,15 @@
   let campaigns = $state([])
   let documents = $state([])
   let edges = $state([])
+  let researchRounds = $state([])
+  let researchQuestions = $state([])
+  let documentChanges = $state([])
   let meta = $state({
     version: '',
     web_discovery: false,
     git_discovery: false,
+    gitlab_discovery: false,
+    commoncrawl_discovery: false,
     mwmbl_discovery: false,
     wayback_enabled: false,
     software_heritage_discovery: false,
@@ -25,6 +30,10 @@
   let selected = $state(null)
   let selectedID = $state('')
   let doc = $state(null)
+  let docExtractions = $state([])
+  let viewedExtraction = $state(null)
+  let reprocessing = $state(false)
+  let docError = $state('')
   let dossier = $state(null)
   let loadingDossier = $state(false)
   let showForm = $state(false)
@@ -59,6 +68,8 @@
       min_domain_interval_seconds: 10,
       use_web_discovery: false,
       use_git_discovery: false,
+      use_gitlab_discovery: false,
+      use_commoncrawl_discovery: false,
       use_mwmbl_discovery: true,
       use_swh_discovery: false
     }
@@ -93,6 +104,8 @@
       stats = s
       if (!meta.web_discovery) form.use_web_discovery = false
       if (!meta.git_discovery) form.use_git_discovery = false
+      if (!meta.gitlab_discovery) form.use_gitlab_discovery = false
+      if (!meta.commoncrawl_discovery) form.use_commoncrawl_discovery = false
       if (selectedID) await loadSelected(selectedID, false)
       error = ''
     } catch (e) {
@@ -121,15 +134,36 @@
 
   async function loadSelected(id, showError = true) {
     try {
-      const [c, e] = await Promise.all([
+      const [c, e, rounds, questions, changes] = await Promise.all([
         api(`/api/campaigns/${id}`),
-        api(`/api/campaigns/${id}/edges?limit=1000`)
+        api(`/api/campaigns/${id}/edges?limit=1000`),
+        api(`/api/campaigns/${id}/rounds`),
+        api(`/api/campaigns/${id}/questions`),
+        api(`/api/campaigns/${id}/changes`)
       ])
       selected = c
       edges = e.items || []
+      researchRounds = rounds || []
+      researchQuestions = questions || []
+      documentChanges = changes || []
     } catch (e) {
       if (showError) error = e.message
     }
+  }
+
+  function researchReason(reason) {
+    return ({
+      evidence_gaps: 'Novas buscas para investigar lacunas nas evidências',
+      no_detected_gaps: 'Nenhuma lacuna detectada pelas regras atuais',
+      open_subquestions: 'Lacunas dos claims fechadas; a rodada busca subperguntas ainda não enviadas',
+      subquestions_searched: 'Subperguntas já foram enviadas e as regras não viram nova lacuna de claim',
+      subquestions_addressed: 'Termos distintivos das subperguntas apareceram em trechos; isso não certifica as respostas',
+      no_new_queries: 'As consultas propostas já foram executadas',
+      no_discovery_provider: 'Nenhuma fonte de descoberta selecionada está disponível',
+      budget_exhausted: 'Limite de coleta ou pesquisas atingido',
+      round_limit: 'Limite de rodadas atingido',
+      evaluation_failed: 'A avaliação esgotou as tentativas; consulte os erros da fila'
+    })[reason] || reason
   }
 
   async function doSearch() {
@@ -168,6 +202,8 @@
         max_bytes: Number(form.max_bytes),
         use_web_discovery: meta.web_discovery && !!form.use_web_discovery,
         use_git_discovery: meta.git_discovery && !!form.use_git_discovery,
+        use_gitlab_discovery: meta.gitlab_discovery && !!form.use_gitlab_discovery,
+        use_commoncrawl_discovery: meta.commoncrawl_discovery && !!form.use_commoncrawl_discovery,
         use_mwmbl_discovery: meta.mwmbl_discovery && !!form.use_mwmbl_discovery,
         use_swh_discovery: meta.software_heritage_discovery && !!form.use_swh_discovery
       }
@@ -202,8 +238,14 @@
   }
 
   async function openDoc(id) {
+    docError = ''
     try {
-      doc = await api(`/api/documents/${id}`)
+      const [document, extractions] = await Promise.all([
+        api(`/api/documents/${id}`), api(`/api/documents/${id}/extractions`)
+      ])
+      doc = document
+      docExtractions = extractions || []
+      viewedExtraction = null
     } catch (e) {
       error = e.message
     }
@@ -211,6 +253,47 @@
 
   function closeDoc() {
     doc = null
+    viewedExtraction = null
+    docExtractions = []
+    docError = ''
+  }
+
+  async function viewExtraction(id) {
+    if (!doc) return
+    try {
+      viewedExtraction = id ? await api(`/api/documents/${doc.id}/extractions/${id}`) : null
+    } catch (e) { error = e.message }
+  }
+
+  async function reprocessDoc(parser = 'native') {
+    if (!doc || reprocessing) return
+    const id = doc.id
+    reprocessing = true
+    docError = ''
+    try {
+      await api(`/api/documents/${id}/reprocess?parser=${parser}`, { method: 'POST' })
+      if (doc?.id === id) await openDoc(id)
+      notice = 'Extração preservada no histórico. As citações anteriores continuam disponíveis.'
+    } catch (e) { docError = e.message }
+    finally { reprocessing = false }
+  }
+
+  async function downloadOriginal() {
+    if (!doc) return
+    const currentDoc = doc
+    docError = ''
+    try {
+      const headers = token ? { 'X-API-Token': token } : {}
+      const response = await fetch(`/api/documents/${currentDoc.id}/original`, { headers })
+      if (!response.ok) throw new Error('Não foi possível verificar e baixar o original.')
+      const blob = await response.blob()
+      const objectURL = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectURL
+      anchor.download = currentDoc.sha256 + (currentDoc.mime === 'application/pdf' ? '.pdf' : '.bin')
+      anchor.click()
+      setTimeout(() => URL.revokeObjectURL(objectURL), 1000)
+    } catch (e) { docError = e.message }
   }
 
   async function openDossier(campaignID) {
@@ -449,6 +532,8 @@
     <span class="version">v{meta.version || '0.2.1'}</span>
     <span class="cap" class:on={meta.web_discovery} title="SearXNG (Descoberta Web)">searxng</span>
     <span class="cap" class:on={meta.git_discovery} title="GitHub (Código)">git</span>
+    <span class="cap" class:on={meta.gitlab_discovery} title="GitLab (README público)">gitlab</span>
+    <span class="cap" class:on={meta.commoncrawl_discovery} title="Common Crawl CDX">cc</span>
     <span class="cap" class:on={meta.mwmbl_discovery} title="Mwmbl (Índice Livre)">mwmbl</span>
     <span class="cap" class:on={meta.wayback_enabled} title="Wayback Machine (Preservação 404)">wayback</span>
     <span class="cap" class:on={meta.mentions_discovery} title="Descoberta Contínua por Menções">menções</span>
@@ -623,6 +708,14 @@
             <span>Descoberta Git {meta.git_discovery ? '(GitHub)' : '(desativada)'}</span>
           </label>
           <label class="check">
+            <input type="checkbox" bind:checked={form.use_gitlab_discovery} disabled={!meta.gitlab_discovery} />
+            <span>Descoberta GitLab {meta.gitlab_discovery ? '(README)' : '(desativada)'}</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={form.use_commoncrawl_discovery} disabled={!meta.commoncrawl_discovery} />
+            <span>Common Crawl {meta.commoncrawl_discovery ? '(CDX por domínio)' : '(desativado)'}</span>
+          </label>
+          <label class="check">
             <input type="checkbox" bind:checked={form.use_mwmbl_discovery} disabled={!meta.mwmbl_discovery} />
             <span>Índice livre independente {meta.mwmbl_discovery ? '(Mwmbl)' : '(desativado)'}</span>
           </label>
@@ -696,6 +789,32 @@
           <p class="muted small" style="margin-top:0.8rem;">
             Limites: profundidade {selected.budget.max_depth} · {selected.budget.max_urls} URLs · {selected.budget.max_domains} domínios
           </p>
+          {#if documentChanges.length > 0}
+            <h3>Mudanças de documento</h3>
+            {#each documentChanges as change (change.id)}
+              <p class="small"><strong>{change.url}</strong><br />{change.summary}</p>
+            {/each}
+          {/if}
+          {#if researchQuestions.length > 0}
+            <h3>Subperguntas</h3>
+            {#each researchQuestions as question (question.ordinal)}
+              <p class="small"><strong>{question.ordinal}. {question.text}</strong><br />{question.status} — {question.evidence_note}</p>
+            {/each}
+          {/if}
+          {#if researchRounds.length > 0}
+            <h3>Rodadas automáticas</h3>
+            {#each researchRounds as round (round.job_id)}
+              <details>
+                <summary>Rodada {round.round}: {round.decision === 'continue' ? 'aprofundar' : 'encerrar'}</summary>
+                <p>{researchReason(round.reason)}</p>
+                <p class="muted small">{round.passages_count} trechos avaliados · {round.claims_count} afirmações · {round.enqueued_queries} novas pesquisas</p>
+                {#each round.leads || [] as lead}
+                  <p class="small"><strong>{lead.query}</strong><br />{lead.reason}</p>
+                {/each}
+              </details>
+            {/each}
+            <p class="muted small">O encerramento por limites ou pelas regras atuais pode deixar perguntas em aberto.</p>
+          {/if}
         </aside>
       {/if}
     </div>
@@ -1093,9 +1212,24 @@
           <a class="external" href={v.url} target="_blank" rel="noreferrer">{v.url} ↗</a>
         {/each}
         <span class="hash">SHA-256: {doc.sha256}</span>
+        <button class="ghost small" onclick={downloadOriginal}>Baixar original verificado</button>
+        <button class="ghost small" disabled={reprocessing} onclick={() => reprocessDoc()}>{reprocessing ? 'Reprocessando…' : 'Reextrair original'}</button>
+        {#if doc.mime === 'application/pdf' && meta.ocr_available}
+          <button class="ghost small" disabled={reprocessing} onclick={() => reprocessDoc('ocr')}>Extrair PDF por OCR</button>
+        {/if}
+        <label>
+          <span>Versão da extração</span>
+          <select value={viewedExtraction?.id || ''} onchange={(event) => viewExtraction(event.currentTarget.value)}>
+            <option value="">Extração ativa</option>
+            {#each docExtractions as extraction (extraction.id)}
+              <option value={extraction.id}>{extraction.parser} {extraction.parser_version} · {formatDate(extraction.created_at)}</option>
+            {/each}
+          </select>
+        </label>
       </div>
       <div class="passages">
-        {#each doc.passages || [] as p}
+        {#if docError}<p role="alert">{docError}</p>{/if}
+        {#each (viewedExtraction?.passages || doc.passages || []) as p}
           <article class="passage">
             <div class="passage-head">
               <span>{passageLabel(p)}</span>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 
@@ -45,6 +46,24 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 		return fmt.Errorf("iniciar tx de claims: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	uniqueCampaigns := map[string]bool{}
+	for _, c := range claims {
+		uniqueCampaigns[c.CampaignID] = true
+	}
+	var campaignIDs []string
+	for id := range uniqueCampaigns {
+		campaignIDs = append(campaignIDs, id)
+	}
+	sort.Strings(campaignIDs)
+	for _, id := range campaignIDs {
+		var lockedID string
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM campaigns WHERE id=$1::uuid FOR UPDATE`, id).Scan(&lockedID); err != nil {
+			return err
+		}
+		if err := archiveClaimsTx(ctx, tx, id); err != nil {
+			return err
+		}
+	}
 
 	campaigns := make(map[string][]string) // campanha -> IDs de claims mantidos
 	clusters := make(map[string]string)    // campanha|fingerprint -> UUID
@@ -84,6 +103,7 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 		}
 		campaigns[c.CampaignID] = append(campaigns[c.CampaignID], claimID)
 
+		evidenceIDs := map[string]string{}
 		for _, ev := range c.Evidences {
 			var clusterID *string
 			if ev.ClusterID != nil && *ev.ClusterID != "" {
@@ -99,16 +119,29 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 				touched[id] = true
 				clusterID = &id
 			}
-			_, err = tx.Exec(ctx, `
+			var persistedID string
+			err = tx.QueryRow(ctx, `
 				INSERT INTO evidence (
 					claim_id, document_id, passage_id, cluster_id, stance, excerpt, page, confidence, is_official_doc, notes,
 					vendor_match, model_match, firmware_match, feature_match, mode_match, prerequisites_match, source_span, validation_run_id
 				)
-				VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+				VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id::text`,
 				claimID, ev.DocumentID, ev.PassageID, clusterID, ev.Stance, ev.Excerpt, ev.Page, ev.Confidence, ev.IsOfficialDoc, ev.Notes,
-				ev.VendorMatch, ev.ModelMatch, ev.FirmwareMatch, ev.FeatureMatch, ev.ModeMatch, ev.PrerequisitesMatch, ev.SourceSpan, ev.ValidationRunID)
+				ev.VendorMatch, ev.ModelMatch, ev.FirmwareMatch, ev.FeatureMatch, ev.ModeMatch, ev.PrerequisitesMatch, ev.SourceSpan, ev.ValidationRunID).Scan(&persistedID)
 			if err != nil {
 				return fmt.Errorf("inserir evidence: %w", err)
+			}
+			if ev.ID != "" {
+				evidenceIDs[ev.ID] = persistedID
+			}
+		}
+		for _, conflict := range c.Contradictions {
+			a, b := evidenceIDs[conflict.EvidenceAID], evidenceIDs[conflict.EvidenceBID]
+			if a == "" || b == "" {
+				return fmt.Errorf("contradição referencia evidência ausente")
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO contradictions(claim_id,evidence_a_id,evidence_b_id,explanation) VALUES($1::uuid,$2::uuid,$3::uuid,$4)`, claimID, a, b, conflict.Explanation); err != nil {
+				return err
 			}
 		}
 	}
@@ -132,6 +165,11 @@ func (s *Store) SaveClaims(ctx context.Context, claims []domain.Claim) error {
 			      WHERE cluster_id = ANY($1::uuid[]) GROUP BY cluster_id) sub
 			WHERE oc.id = sub.cluster_id`, ids); err != nil {
 			return fmt.Errorf("atualizar contagem de réplicas: %w", err)
+		}
+	}
+	for _, id := range campaignIDs {
+		if err := archiveClaimsTx(ctx, tx, id); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)
@@ -192,9 +230,30 @@ func (s *Store) ListClaimsByCampaign(ctx context.Context, campaignID string) ([]
 			return nil, err
 		}
 		c.Evidences = evs
+		c.Contradictions, err = s.listContradictionsByClaim(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
 		claims = append(claims, c)
 	}
 	return claims, rows.Err()
+}
+
+func (s *Store) listContradictionsByClaim(ctx context.Context, claimID string) ([]domain.Contradiction, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text,claim_id::text,evidence_a_id::text,evidence_b_id::text,explanation,created_at FROM contradictions WHERE claim_id=$1::uuid ORDER BY created_at,id`, claimID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Contradiction
+	for rows.Next() {
+		var c domain.Contradiction
+		if err := rows.Scan(&c.ID, &c.ClaimID, &c.EvidenceAID, &c.EvidenceBID, &c.Explanation, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) listEvidenceByClaim(ctx context.Context, claimID string) ([]domain.Evidence, error) {

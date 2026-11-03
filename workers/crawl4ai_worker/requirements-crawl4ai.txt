@@ -1,0 +1,3 @@
+# Opcional. O worker funciona com Playwright sem este pacote.
+# A coleta continua passando pelo firewall de subrecursos; este pacote não substitui essa proteção.
+crawl4ai>=0.4.0

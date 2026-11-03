@@ -145,3 +145,16 @@ func TestOCRArgsWriteToStdout(t *testing.T) {
 		t.Errorf("tesseract deve usar 'stdout', obteve %q", got)
 	}
 }
+
+func TestExtractPDFAnnotationLinksAndOffsets(t *testing.T) {
+	rawPDF := append(minimalPDF("Huawei NE8000 VRP v8 Manual"),
+		[]byte("\n<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://support.huawei.com/hedex/ne8000-vrpv8.pdf) >> >>\n")...)
+	links := ExtractPDFAnnotationLinks(rawPDF)
+	if len(links) != 1 || links[0] != "https://support.huawei.com/hedex/ne8000-vrpv8.pdf" {
+		t.Fatalf("esperava extrair link de anotação /URI do PDF, obteve: %v", links)
+	}
+	passages := MakePassages("Linha 1 de configuração\nLinha 2 de verificação", nil, 200)
+	if len(passages) != 1 || passages[0].EndOffset <= passages[0].StartOffset {
+		t.Fatalf("esperava offsets válidos no trecho, obteve: %+v", passages)
+	}
+}

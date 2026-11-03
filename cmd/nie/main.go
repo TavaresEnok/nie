@@ -40,6 +40,11 @@ func main() {
 		logger.Error("migrações", "err", err)
 		os.Exit(1)
 	}
+	if cfg.PGVector {
+		if err := st.EnsureVector(ctx); err != nil {
+			logger.Error("pgvector não ficou disponível; a busca lexical continua", "err", err)
+		}
+	}
 
 	objects, err := storage.New(cfg.DataDir)
 	if err != nil {

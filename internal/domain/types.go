@@ -38,32 +38,50 @@ type Campaign struct {
 }
 
 type Job struct {
-	ID            int64           `json:"id"`
-	CampaignID    string          `json:"campaign_id"`
-	Kind          string          `json:"kind"`
-	URL           string          `json:"url,omitempty"`
-	NormalizedURL string          `json:"normalized_url,omitempty"`
-	Domain        string          `json:"domain,omitempty"`
-	Depth         int             `json:"depth"`
-	Priority      int             `json:"priority"`
-	ParentURL     string          `json:"parent_url,omitempty"`
-	Reason        string          `json:"reason,omitempty"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	Status        string          `json:"status"`
-	Attempts      int             `json:"attempts"`
-	MaxAttempts   int             `json:"max_attempts"`
-	ScheduledAt   time.Time       `json:"scheduled_at"`
-	LeaseUntil    *time.Time      `json:"lease_until,omitempty"`
-	LastError     string          `json:"last_error,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID              int64           `json:"id"`
+	CampaignID      string          `json:"campaign_id"`
+	Kind            string          `json:"kind"`
+	URL             string          `json:"url,omitempty"`
+	NormalizedURL   string          `json:"normalized_url,omitempty"`
+	Domain          string          `json:"domain,omitempty"`
+	Depth           int             `json:"depth"`
+	Priority        int             `json:"priority"`
+	ParentURL       string          `json:"parent_url,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Status          string          `json:"status"`
+	Attempts        int             `json:"attempts"`
+	LeaseGeneration int64           `json:"lease_generation"`
+	MaxAttempts     int             `json:"max_attempts"`
+	ScheduledAt     time.Time       `json:"scheduled_at"`
+	LeaseUntil      *time.Time      `json:"lease_until,omitempty"`
+	LastError       string          `json:"last_error,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 type Passage struct {
-	ID         int64  `json:"id"`
-	DocumentID string `json:"document_id"`
-	Ordinal    int    `json:"ordinal"`
-	Page       *int   `json:"page,omitempty"`
-	Text       string `json:"text"`
+	ID              int64  `json:"id"`
+	DocumentID      string `json:"document_id"`
+	Ordinal         int    `json:"ordinal"`
+	Page            *int   `json:"page,omitempty"`
+	Text            string `json:"text"`
+	ExtractionRunID string `json:"extraction_run_id,omitempty"`
+	StartOffset     *int   `json:"start_offset,omitempty"`
+	EndOffset       *int   `json:"end_offset,omitempty"`
+}
+
+type ExtractionRun struct {
+	ID             string         `json:"id"`
+	DocumentID     string         `json:"document_id"`
+	Parser         string         `json:"parser"`
+	ParserVersion  string         `json:"parser_version"`
+	Config         map[string]any `json:"config"`
+	InputSHA256    *string        `json:"input_sha256,omitempty"`
+	IdentitySHA256 *string        `json:"identity_sha256,omitempty"`
+	Title          string         `json:"title"`
+	Text           string         `json:"text,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	Passages       []Passage      `json:"passages,omitempty"`
 }
 
 type DocumentVersion struct {
@@ -80,16 +98,17 @@ type DocumentVersion struct {
 }
 
 type Document struct {
-	ID        string            `json:"id"`
-	SHA256    string            `json:"sha256"`
-	MIME      string            `json:"mime"`
-	Title     string            `json:"title"`
-	Size      int64             `json:"size"`
-	Text      string            `json:"text,omitempty"`
-	Metadata  map[string]any    `json:"metadata,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	Versions  []DocumentVersion `json:"versions,omitempty"`
-	Passages  []Passage         `json:"passages,omitempty"`
+	ID                 string            `json:"id"`
+	SHA256             string            `json:"sha256"`
+	MIME               string            `json:"mime"`
+	Title              string            `json:"title"`
+	Size               int64             `json:"size"`
+	Text               string            `json:"text,omitempty"`
+	Metadata           map[string]any    `json:"metadata,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	Versions           []DocumentVersion `json:"versions,omitempty"`
+	Passages           []Passage         `json:"passages,omitempty"`
+	ActiveExtractionID *string           `json:"active_extraction_id,omitempty"`
 }
 
 type DocumentSummary struct {
@@ -106,19 +125,20 @@ type DocumentSummary struct {
 }
 
 type SearchResult struct {
-	PassageID  int64     `json:"passage_id"`
-	DocumentID string    `json:"document_id"`
-	Title      string    `json:"title"`
-	MIME       string    `json:"mime"`
-	SHA256     string    `json:"sha256"`
-	URL        string    `json:"url"`
-	Domain     string    `json:"domain"`
-	Page       *int      `json:"page,omitempty"`
-	Ordinal    int       `json:"ordinal"`
-	Snippet    string    `json:"snippet"`
-	Match      string    `json:"match"`
-	Score      float64   `json:"score"`
-	FetchedAt  time.Time `json:"fetched_at"`
+	ExtractionRunID string    `json:"extraction_run_id,omitempty"`
+	PassageID       int64     `json:"passage_id"`
+	DocumentID      string    `json:"document_id"`
+	Title           string    `json:"title"`
+	MIME            string    `json:"mime"`
+	SHA256          string    `json:"sha256"`
+	URL             string    `json:"url"`
+	Domain          string    `json:"domain"`
+	Page            *int      `json:"page,omitempty"`
+	Ordinal         int       `json:"ordinal"`
+	Snippet         string    `json:"snippet"`
+	Match           string    `json:"match"`
+	Score           float64   `json:"score"`
+	FetchedAt       time.Time `json:"fetched_at"`
 }
 
 type DiscoveryEdge struct {
@@ -343,16 +363,18 @@ type DiscoveryCandidate struct {
 }
 
 type FetchTask struct {
-	ID           string        `json:"id"`
-	CampaignID   string        `json:"campaign_id"`
-	URL          string        `json:"url"`
-	Mode         string        `json:"mode"`     // http, browser, git, file
-	Executor     string        `json:"executor"` // native, scrapy, crawl4ai
-	Deadline     time.Time     `json:"deadline"`
-	Timeout      time.Duration `json:"timeout"`
-	MaxBytes     int64         `json:"max_bytes"`
-	DomainPolicy string        `json:"domain_policy"`
-	CreatedAt    time.Time     `json:"created_at"`
+	ID              string        `json:"id"`
+	CampaignID      string        `json:"campaign_id"`
+	URL             string        `json:"url"`
+	Mode            string        `json:"mode"`     // http, browser, git, file
+	Executor        string        `json:"executor"` // native, scrapy, crawl4ai
+	Deadline        time.Time     `json:"deadline"`
+	Timeout         time.Duration `json:"timeout"`
+	MaxBytes        int64         `json:"max_bytes"`
+	IfNoneMatch     string        `json:"if_none_match,omitempty"`
+	IfModifiedSince string        `json:"if_modified_since,omitempty"`
+	DomainPolicy    string        `json:"domain_policy"`
+	CreatedAt       time.Time     `json:"created_at"`
 }
 
 type FetchResult struct {

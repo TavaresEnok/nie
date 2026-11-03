@@ -100,6 +100,16 @@ func (r *Runner) tick(ctx context.Context) error {
 					r.logger.Warn("enfileirar github para agendamento", "campaign", camp.ID, "err", err)
 				}
 			}
+			if r.cfg.GitLabEnabled {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_gitlab", s.Query); err != nil {
+					r.logger.Warn("enfileirar gitlab para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
+			if r.cfg.CommonCrawlEnabled {
+				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_commoncrawl", s.Query); err != nil {
+					r.logger.Warn("enfileirar common crawl para agendamento", "campaign", camp.ID, "err", err)
+				}
+			}
 			if r.cfg.SoftwareHeritageEnabled {
 				if _, err := r.store.EnqueueDiscovery(ctx, camp.ID, "discover_swh", s.Query); err != nil {
 					r.logger.Warn("enfileirar swh para agendamento", "campaign", camp.ID, "err", err)
@@ -114,6 +124,17 @@ func (r *Runner) tick(ctx context.Context) error {
 
 		// Registrar alerta informativo de disparo
 		_ = r.store.CreateAlert(ctx, &camp.ID, fmt.Sprintf("Agendamento disparado: %s", s.Name), fmt.Sprintf("Campanha '%s' criada automaticamente com descoberta contínua.", camp.ID), "info")
+	}
+	if r.cfg.RevisitInterval > 0 {
+		due, err := r.store.ListDueObservations(ctx, r.cfg.RevisitInterval)
+		if err != nil {
+			return err
+		}
+		for _, item := range due {
+			if _, err := r.store.EnqueueRevisit(ctx, item.CampaignID, item.URL); err != nil {
+				r.logger.Warn("enfileirar revisita", "campaign", item.CampaignID, "url", item.URL, "err", err)
+			}
+		}
 	}
 	return nil
 }

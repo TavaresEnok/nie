@@ -21,7 +21,8 @@ var (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool           *pgxpool.Pool
+	researchRounds int
 }
 
 func New(ctx context.Context, dsn string) (*Store, error) {
@@ -65,6 +66,7 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT count(DISTINCT p.id)::int AS passages
     FROM passages p
+    JOIN documents active_doc ON active_doc.id=p.document_id AND active_doc.active_extraction_id=p.extraction_run_id
     JOIN document_versions v ON v.document_id = p.document_id
     WHERE v.campaign_id = c.id
 ) p ON true
@@ -207,95 +209,32 @@ func (s *Store) SetCampaignStatus(ctx context.Context, id, status string) error 
 }
 
 type DocumentRecord struct {
-	SHA256        string
-	MIME          string
-	Title         string
-	Size          int64
-	Text          string
-	Metadata      map[string]any
-	CampaignID    string
-	URL           string
-	NormalizedURL string
-	Domain        string
-	StatusCode    int
-	ETag          string
-	LastModified  string
-	Passages      []domain.Passage
+	Parser                string
+	ParserVersion         string
+	ParserConfig          map[string]any
+	ExtractionInputSHA256 string
+	SHA256                string
+	MIME                  string
+	Title                 string
+	Size                  int64
+	Text                  string
+	Metadata              map[string]any
+	CampaignID            string
+	URL                   string
+	NormalizedURL         string
+	Domain                string
+	StatusCode            int
+	ETag                  string
+	LastModified          string
+	Passages              []domain.Passage
 }
 
 func (s *Store) RecordDocument(ctx context.Context, rec DocumentRecord) (string, bool, error) {
-	meta, _ := json.Marshal(rec.Metadata)
-	tx, err := s.pool.Begin(ctx)
+	saved, err := s.SaveDocument(ctx, rec)
 	if err != nil {
 		return "", false, err
 	}
-	defer tx.Rollback(ctx)
-
-	var docID string
-	created := false
-	err = tx.QueryRow(ctx, `
-		INSERT INTO documents(sha256, mime, title, size, text, metadata)
-		VALUES($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (sha256) DO NOTHING
-		RETURNING id::text`,
-		rec.SHA256, rec.MIME, rec.Title, rec.Size, rec.Text, meta,
-	).Scan(&docID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		if err := tx.QueryRow(ctx, `SELECT id::text FROM documents WHERE sha256=$1`, rec.SHA256).Scan(&docID); err != nil {
-			return "", false, err
-		}
-	} else if err != nil {
-		return "", false, fmt.Errorf("inserir documento: %w", err)
-	} else {
-		created = true
-	}
-
-	// Documento já conhecido mas ainda sem trechos (ex.: PDF escaneado guardado
-	// como extraction_pending): uma extração posterior (OCR/Docling) do mesmo
-	// SHA-256 preenche texto e trechos, sem nova coleta e sem duplicar o original.
-	fill := created
-	if !created && len(rec.Passages) > 0 {
-		var existing int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM passages WHERE document_id=$1::uuid`, docID).Scan(&existing); err != nil {
-			return "", false, err
-		}
-		if existing == 0 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE documents
-				SET text=$2, mime=$3, title=COALESCE(NULLIF($4, ''), title),
-				    metadata = metadata || $5::jsonb || '{"extraction_status":"done"}'::jsonb
-				WHERE id=$1::uuid`, docID, rec.Text, rec.MIME, rec.Title, meta); err != nil {
-				return "", false, fmt.Errorf("atualizar documento reprocessado: %w", err)
-			}
-			fill = true
-		}
-	}
-	if fill {
-		for _, p := range rec.Passages {
-			_, err := tx.Exec(ctx, `
-				INSERT INTO passages(document_id, ordinal, page, text)
-				VALUES($1::uuid, $2, $3, $4)`,
-				docID, p.Ordinal, p.Page, p.Text)
-			if err != nil {
-				return "", false, fmt.Errorf("inserir trecho: %w", err)
-			}
-		}
-	}
-
-	_, err = tx.Exec(ctx, `
-		INSERT INTO document_versions(document_id, campaign_id, url, normalized_url, domain, status_code, etag, last_modified)
-		VALUES($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (campaign_id, document_id, normalized_url)
-		DO UPDATE SET fetched_at=now(), status_code=EXCLUDED.status_code,
-		              etag=EXCLUDED.etag, last_modified=EXCLUDED.last_modified`,
-		docID, rec.CampaignID, rec.URL, rec.NormalizedURL, rec.Domain, rec.StatusCode, rec.ETag, rec.LastModified)
-	if err != nil {
-		return "", false, fmt.Errorf("inserir versão: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", false, err
-	}
-	return docID, created, nil
+	return saved.ID, saved.Created, nil
 }
 
 func (s *Store) EnqueueFetch(ctx context.Context, campaignID, rawURL string, depth int, parentURL, reason string, priority int) (bool, error) {
@@ -404,7 +343,7 @@ func NormalizeQuery(q string) string {
 // campanha+tipo+consulta normalizada (a mesma consulta nunca roda duas vezes) e
 // reabre a campanha se ela já estava concluída, para que o worker a execute.
 func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query string) (bool, error) {
-	if kind != "discover_web" && kind != "discover_github" && kind != "discover_mwmbl" && kind != "discover_swh" {
+	if kind != "discover_web" && kind != "discover_github" && kind != "discover_gitlab" && kind != "discover_mwmbl" && kind != "discover_swh" && kind != "discover_commoncrawl" {
 		return false, fmt.Errorf("kind de descoberta inválido")
 	}
 	norm := NormalizeQuery(query)
@@ -426,7 +365,7 @@ func (s *Store) EnqueueDiscovery(ctx context.Context, campaignID, kind, query st
 		return false, err
 	}
 	var used int
-	if err := tx.QueryRow(ctx, `SELECT count(*)::int FROM jobs WHERE campaign_id=$1::uuid AND kind <> 'fetch'`, campaignID).Scan(&used); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*)::int FROM jobs WHERE campaign_id=$1::uuid AND kind LIKE 'discover_%'`, campaignID).Scan(&used); err != nil {
 		return false, err
 	}
 	if used >= MaxDiscoveryJobsPerCampaign {
@@ -471,17 +410,17 @@ func (s *Store) ClaimJob(ctx context.Context, lease time.Duration) (*domain.Job,
 			LIMIT 1
 		)
 		UPDATE jobs j
-		SET status='running', attempts=j.attempts+1, lease_until=now()+$1::interval, updated_at=now()
+		SET status='running', attempts=j.attempts+1, lease_generation=j.lease_generation+1, lease_until=now()+$1::interval, updated_at=now()
 		FROM candidate
 		WHERE j.id=candidate.id
 		RETURNING j.id, j.campaign_id::text, j.kind, COALESCE(j.url,''), COALESCE(j.url_hash,''),
 		          j.domain, j.depth, j.priority, COALESCE(j.parent_url,''), COALESCE(j.reason,''),
 		          j.payload, j.status, j.attempts, j.max_attempts, j.scheduled_at, j.lease_until,
-		          j.last_error, j.created_at`,
+		          j.last_error, j.created_at, j.lease_generation`,
 		fmt.Sprintf("%d seconds", int(lease.Seconds())),
 	).Scan(&j.ID, &j.CampaignID, &j.Kind, &j.URL, &j.NormalizedURL, &j.Domain, &j.Depth,
 		&j.Priority, &j.ParentURL, &j.Reason, &payload, &j.Status, &j.Attempts,
-		&j.MaxAttempts, &j.ScheduledAt, &leaseUntil, &lastErr, &j.CreatedAt)
+		&j.MaxAttempts, &j.ScheduledAt, &leaseUntil, &lastErr, &j.CreatedAt, &j.LeaseGeneration)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -516,8 +455,33 @@ func (s *Store) ReapExpiredJobs(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// FinishIdleCampaigns conclui campanhas sem jobs pendentes ou em execução.
+// FinishIdleCampaigns agenda avaliação ou conclui campanhas sem jobs ativos.
 func (s *Store) FinishIdleCampaigns(ctx context.Context) (int64, error) {
+	if s.researchRounds > 0 {
+		rows, err := s.pool.Query(ctx, `SELECT id::text FROM campaigns c WHERE status IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.campaign_id=c.id AND j.status IN ('pending','running'))`)
+		if err != nil {
+			return 0, err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		for _, id := range ids {
+			if err := s.FinishIfIdle(ctx, id); err != nil {
+				return 0, err
+			}
+		}
+		return int64(len(ids)), nil
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE campaigns c
 		SET status='completed', updated_at=now(), finished_at=now()
@@ -580,6 +544,29 @@ func (s *Store) FinishIfIdle(ctx context.Context, campaignID string) error {
 		return err
 	}
 	if active == 0 && (status == "queued" || status == "running") {
+		if s.researchRounds > 0 {
+			// Uma avaliação que esgotou as tentativas também precisa deixar
+			// um motivo de parada, inclusive após queda do processo.
+			if _, err := tx.Exec(ctx, `INSERT INTO research_rounds(job_id,campaign_id,round_number,decision,reason,claims_count,passages_count,enqueued_queries)
+			SELECT id,campaign_id,(payload->>'round')::int,'stop','evaluation_failed',0,0,0 FROM jobs
+			WHERE campaign_id=$1::uuid AND kind='investigate' AND status='dead' ON CONFLICT DO NOTHING`, campaignID); err != nil {
+				return err
+			}
+			var rounds int
+			var stopped bool
+			if err := tx.QueryRow(ctx, `SELECT count(*)::int FROM jobs WHERE campaign_id=$1::uuid AND kind='investigate'`, campaignID).Scan(&rounds); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM research_rounds WHERE campaign_id=$1::uuid AND decision <> 'continue')`, campaignID).Scan(&stopped); err != nil {
+				return err
+			}
+			if rounds < s.researchRounds && !stopped {
+				if _, err := tx.Exec(ctx, `INSERT INTO jobs(campaign_id,kind,priority,reason,payload) VALUES($1::uuid,'investigate',200,'automatic_research',jsonb_build_object('round',$2::int))`, campaignID, rounds+1); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE campaigns SET status='completed', updated_at=now(), finished_at=now() WHERE id=$1::uuid`, campaignID); err != nil {
 			return err
 		}
@@ -721,7 +708,7 @@ func (s *Store) ListJobs(ctx context.Context, campaignID, status string, limit i
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, campaign_id::text, kind, COALESCE(url,''), COALESCE(url_hash,''), domain,
 		       depth, priority, COALESCE(parent_url,''), COALESCE(reason,''), payload, status,
-		       attempts, max_attempts, scheduled_at, lease_until, last_error, created_at
+		       attempts, max_attempts, scheduled_at, lease_until, last_error, created_at, lease_generation
 		FROM jobs WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY id DESC LIMIT $`+fmt.Sprint(len(args)), args...)
 	if err != nil {
@@ -736,7 +723,7 @@ func (s *Store) ListJobs(ctx context.Context, campaignID, status string, limit i
 		var lease *time.Time
 		if err := rows.Scan(&j.ID, &j.CampaignID, &j.Kind, &j.URL, &j.NormalizedURL, &j.Domain,
 			&j.Depth, &j.Priority, &j.ParentURL, &j.Reason, &payload, &j.Status, &j.Attempts,
-			&j.MaxAttempts, &j.ScheduledAt, &lease, &lastErr, &j.CreatedAt); err != nil {
+			&j.MaxAttempts, &j.ScheduledAt, &lease, &lastErr, &j.CreatedAt, &j.LeaseGeneration); err != nil {
 			return nil, err
 		}
 		j.Payload = payload

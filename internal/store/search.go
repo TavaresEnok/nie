@@ -91,7 +91,7 @@ func (s *Store) Search(ctx context.Context, q, campaignID string, limit int) ([]
 }
 
 const searchSelect = `
-SELECT p.id, p.document_id::text, d.title, d.mime, d.sha256, v.url, v.domain,
+SELECT p.id, p.document_id::text, p.extraction_run_id::text, d.title, d.mime, d.sha256, v.url, v.domain,
        p.page, p.ordinal, p.text, v.fetched_at, %s AS score
 FROM passages p
 JOIN documents d ON d.id = p.document_id
@@ -101,7 +101,7 @@ JOIN LATERAL (
     WHERE dv.document_id = d.id AND ($3::uuid IS NULL OR dv.campaign_id = $3::uuid)
     ORDER BY dv.fetched_at DESC LIMIT 1
 ) v ON true
-WHERE %s
+WHERE p.extraction_run_id=d.active_extraction_id AND (%s)
 ORDER BY %s
 LIMIT $2`
 
@@ -146,7 +146,7 @@ func (s *Store) scanSearch(ctx context.Context, match, query string, args ...any
 		var r searchRow
 		var page *int
 		var fetched time.Time
-		if err := rows.Scan(&r.result.PassageID, &r.result.DocumentID, &r.result.Title, &r.result.MIME,
+		if err := rows.Scan(&r.result.PassageID, &r.result.DocumentID, &r.result.ExtractionRunID, &r.result.Title, &r.result.MIME,
 			&r.result.SHA256, &r.result.URL, &r.result.Domain, &page, &r.result.Ordinal,
 			&r.text, &fetched, &r.result.Score); err != nil {
 			return nil, err
@@ -218,9 +218,9 @@ func (s *Store) GetDocument(ctx context.Context, id string) (domain.Document, er
 	var d domain.Document
 	var meta []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, sha256, mime, title, size, text, metadata, created_at
+		SELECT id::text, sha256, mime, title, size, text, metadata, created_at, active_extraction_id::text
 		FROM documents WHERE id=$1::uuid`, id).
-		Scan(&d.ID, &d.SHA256, &d.MIME, &d.Title, &d.Size, &d.Text, &meta, &d.CreatedAt)
+		Scan(&d.ID, &d.SHA256, &d.MIME, &d.Title, &d.Size, &d.Text, &meta, &d.CreatedAt, &d.ActiveExtractionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Document{}, ErrNotFound
 	}
@@ -250,21 +250,10 @@ func (s *Store) GetDocument(ctx context.Context, id string) (domain.Document, er
 		return domain.Document{}, err
 	}
 
-	rows, err = s.pool.Query(ctx, `
-		SELECT id, document_id::text, ordinal, page, text
-		FROM passages WHERE document_id=$1::uuid ORDER BY ordinal`, id)
-	if err != nil {
-		return domain.Document{}, err
+	if d.ActiveExtractionID != nil {
+		d.Passages, err = s.extractionPassages(ctx, id, *d.ActiveExtractionID)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var p domain.Passage
-		if err := rows.Scan(&p.ID, &p.DocumentID, &p.Ordinal, &p.Page, &p.Text); err != nil {
-			return domain.Document{}, err
-		}
-		d.Passages = append(d.Passages, p)
-	}
-	return d, rows.Err()
+	return d, err
 }
 
 func (s *Store) ListDocuments(ctx context.Context, limit int, campaignID string) ([]domain.DocumentSummary, error) {

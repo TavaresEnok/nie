@@ -152,6 +152,13 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+CRAWL4AI_AVAILABLE = False
+try:
+    import crawl4ai  # noqa: F401
+    CRAWL4AI_AVAILABLE = True
+except ImportError:
+    CRAWL4AI_AVAILABLE = False
+
 @app.get("/health")
 def health():
     return {
@@ -159,6 +166,7 @@ def health():
         "worker": "crawl4ai_browser",
         "version": "2.1.0",
         "playwright_enabled": PLAYWRIGHT_AVAILABLE,
+        "crawl4ai_installed": CRAWL4AI_AVAILABLE,
         "capabilities": ["browser", "markdown", "ssrf_guard", "subresource_firewall"]
     }
 

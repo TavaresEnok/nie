@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ledongthuc/pdf"
 	"golang.org/x/net/html"
@@ -18,17 +20,21 @@ const (
 )
 
 type Passage struct {
-	Ordinal int
-	Page    *int
-	Text    string
+	Ordinal     int
+	Page        *int
+	Text        string
+	StartOffset int
+	EndOffset   int
 }
 
 type Result struct {
-	Title    string
-	Text     string
-	MIME     string
-	Links    []string
-	Passages []Passage
+	Title         string
+	Text          string
+	MIME          string
+	Links         []string
+	Passages      []Passage
+	Parser        string
+	ParserVersion string
 	// LinkKind é o tipo de aresta para Links ("" = link HTML comum; ver feed.go).
 	LinkKind string
 	// FeedLinks são feeds RSS/Atom anunciados por <link rel="alternate"> no HTML.
@@ -47,7 +53,7 @@ func HTML(base *url.URL, contentType string, body []byte) (Result, error) {
 		return Result{}, fmt.Errorf("parse HTML: %w", err)
 	}
 
-	res := Result{MIME: "text/html"}
+	res := Result{MIME: "text/html", Parser: "nie-html", ParserVersion: "1.2.0"}
 	res.Title = strings.TrimSpace(collapse(nodeText(findElement(doc, "title"))))
 
 	var text strings.Builder
@@ -132,7 +138,36 @@ func feedAutodiscovery(base *url.URL, head *html.Node) []string {
 	return feeds
 }
 
-var urlRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-\._~:/\?#\[\]@!$&'\(\)\*\+,;=%]+[a-zA-Z0-9/_]`)
+var (
+	urlRegex      = regexp.MustCompile(`https?://[a-zA-Z0-9\-\._~:/\?#\[\]@!$&'\(\)\*\+,;=%]+[a-zA-Z0-9/_]`)
+	pdfURIAnnotRE = regexp.MustCompile(`/URI\s*\((https?://[^)\r\n]+)\)`)
+)
+
+// ExtractPDFAnnotationLinks extrai links de anotações interativas (/Annot /Link /URI (...)) embutidas na estrutura PDF.
+func ExtractPDFAnnotationLinks(body []byte) []string {
+	matches := pdfURIAnnotRE.FindAllSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		raw := strings.TrimSpace(string(m[1]))
+		// Remove escapes básicos de string literal PDF: \( \) \\
+		raw = strings.ReplaceAll(raw, `\(`, "(")
+		raw = strings.ReplaceAll(raw, `\)`, ")")
+		raw = strings.ReplaceAll(raw, `\\`, `\`)
+		cleaned := strings.TrimRight(raw, ".,;:!?)'\"")
+		if _, ok := seen[cleaned]; !ok && len(cleaned) > 8 {
+			seen[cleaned] = struct{}{}
+			out = append(out, cleaned)
+		}
+	}
+	return out
+}
 
 // ExtractURLLinks extrai URLs e citações de hiperlinks presentes no texto puro de PDFs ou documentos técnicos.
 func ExtractURLLinks(text string) []string {
@@ -157,7 +192,7 @@ func Text(body []byte) (Result, error) {
 	if len(text) > MaxTextChars {
 		text = text[:MaxTextChars]
 	}
-	res := Result{MIME: "text/plain", Text: text}
+	res := Result{MIME: "text/plain", Text: text, Parser: "nie-text", ParserVersion: "1.2.0"}
 	if first := firstLine(text); len(first) < 200 {
 		res.Title = first
 	}
@@ -173,12 +208,14 @@ func PDF(body []byte) (res Result, err error) {
 			res = Result{}
 		}
 	}()
+	annotLinks := ExtractPDFAnnotationLinks(body)
 	reader, err := pdf.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return Result{}, fmt.Errorf("abrir PDF: %w", err)
 	}
-	res = Result{MIME: "application/pdf"}
+	res = Result{MIME: "application/pdf", Parser: "nie-pdf", ParserVersion: "1.2.0"}
 	var all strings.Builder
+	baseOffset := 0
 	for page := 1; page <= reader.NumPage(); page++ {
 		p := reader.Page(page)
 		if p.V.IsNull() {
@@ -193,9 +230,16 @@ func PDF(body []byte) (res Result, err error) {
 			continue
 		}
 		pn := page
+		pagePassages := MakePassages(clean, &pn, DefaultPassageChars)
+		for i := range pagePassages {
+			pagePassages[i].Ordinal = len(res.Passages) + i
+			pagePassages[i].StartOffset += baseOffset
+			pagePassages[i].EndOffset += baseOffset
+		}
+		res.Passages = append(res.Passages, pagePassages...)
 		all.WriteString(clean)
 		all.WriteString("\n\n")
-		res.Passages = append(res.Passages, MakePassages(clean, &pn, DefaultPassageChars)...)
+		baseOffset = all.Len()
 	}
 	res.Text = strings.TrimSpace(all.String())
 	if len(res.Text) > MaxTextChars {
@@ -205,58 +249,56 @@ func PDF(body []byte) (res Result, err error) {
 		return Result{}, fmt.Errorf("PDF sem texto extraível (OCR não habilitado)")
 	}
 	res.Title = firstLine(res.Text)
-	res.Links = ExtractURLLinks(res.Text)
+	seenLinks := make(map[string]struct{})
+	for _, l := range ExtractURLLinks(res.Text) {
+		seenLinks[l] = struct{}{}
+		res.Links = append(res.Links, l)
+	}
+	for _, l := range annotLinks {
+		if _, ok := seenLinks[l]; !ok {
+			seenLinks[l] = struct{}{}
+			res.Links = append(res.Links, l)
+		}
+	}
 	return res, nil
 }
 
 func MakePassages(text string, page *int, max int) []Passage {
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	if max < 200 {
 		max = DefaultPassageChars
 	}
 	var out []Passage
-	var b strings.Builder
-	flush := func() {
-		chunk := strings.TrimSpace(b.String())
+	for start := 0; start < len(text); {
+		for start < len(text) {
+			r, n := utf8.DecodeRuneInString(text[start:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			start += n
+		}
+		if start >= len(text) {
+			break
+		}
+		end := min(start+max, len(text))
+		for end < len(text) && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end < len(text) {
+			if cut := strings.LastIndexAny(text[start:end], " \t\n"); cut > max/2 {
+				end = start + cut
+			}
+		}
+		chunk := strings.TrimSpace(text[start:end])
 		if chunk != "" {
-			out = append(out, Passage{Ordinal: len(out), Page: page, Text: chunk})
+			out = append(out, Passage{Ordinal: len(out), Page: page, Text: chunk, StartOffset: start, EndOffset: start + len(chunk)})
 		}
-		b.Reset()
+		start = end
 	}
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if b.Len() > 0 && b.Len()+len(line)+1 > max {
-			flush()
-		}
-		for len(line) > max {
-			cut := max
-			if idx := strings.LastIndexAny(line[:max], " \t"); idx > max/2 {
-				cut = idx
-			}
-			if b.Len() > 0 {
-				flush()
-			}
-			out = append(out, Passage{Ordinal: len(out), Page: page, Text: strings.TrimSpace(line[:cut])})
-			line = strings.TrimSpace(line[cut:])
-		}
-		if line == "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(line)
-	}
-	flush()
 	return out
 }
-
 func NormalizeText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")

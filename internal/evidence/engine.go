@@ -159,21 +159,32 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 	fullyRefuted := false     // refutação que também casa modelo e firmware
 	hasOfficialSupport := false
 	officialScoped := false
+	hasMatchingSupport := false // suporte que casa fabricante+recurso pedidos
 
 	var supportFP, supportDom []string
 	var scopedFP, scopedDom []string
+	var firstSupportID, firstRefuteID string
 
 	for _, ev := range evidences {
 		switch ev.Stance {
 		case "refutes":
 			if ev.VendorMatch && ev.FeatureMatch {
 				hasContradiction = true
+				if firstRefuteID == "" {
+					firstRefuteID = ev.ID
+				}
 				if ev.ModelMatch && ev.FirmwareMatch {
 					fullyRefuted = true
 				}
 			}
 			continue
 		case "supports":
+			if ev.VendorMatch && ev.FeatureMatch {
+				hasMatchingSupport = true
+				if firstSupportID == "" {
+					firstSupportID = ev.ID
+				}
+			}
 		default: // "mentions" e qualquer outro valor: relevante, mas não é prova
 			continue
 		}
@@ -188,7 +199,12 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 				dom = parts[1]
 			}
 		}
-		supportFP, supportDom = append(supportFP, fp), append(supportDom, dom)
+		// Uma fonte só pode corroborar a consulta quando o suporte se refere
+		// ao fabricante e ao recurso consultados. Outros suportes podem ser
+		// documentação relacionada, mas não são votos para esta afirmação.
+		if ev.VendorMatch && ev.FeatureMatch {
+			supportFP, supportDom = append(supportFP, fp), append(supportDom, dom)
+		}
 
 		scoped := ev.VendorMatch && ev.ModelMatch && ev.FirmwareMatch && ev.FeatureMatch
 		if scoped {
@@ -202,12 +218,25 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 		}
 	}
 
+	if hasContradiction && hasMatchingSupport && firstSupportID != "" && firstRefuteID != "" && len(claim.Contradictions) == 0 {
+		claim.Contradictions = append(claim.Contradictions, domain.Contradiction{
+			ID:          fmt.Sprintf("contradiction-%s-%s", firstSupportID, firstRefuteID),
+			ClaimID:     claim.ID,
+			EvidenceAID: firstSupportID,
+			EvidenceBID: firstRefuteID,
+			Explanation: "Conflito explícito entre evidências de suporte e refutação para o escopo consultado",
+		})
+	}
+
 	switch {
-	case fullyRefuted:
+	case fullyRefuted && !hasMatchingSupport:
 		claim.Status = "contested"
 		claim.Applicability = "incompatible"
 	case hasContradiction:
+		// Regra 9 (Seção 10.3): conflito entre suporte e refutação permanece
+		// contestado/indeterminado, não se converte automaticamente em incompatible.
 		claim.Status = "contested"
+		claim.Applicability = "indeterminate"
 	case officialScoped:
 		claim.Status = "sustained"
 		claim.Applicability = "applicable"
@@ -228,7 +257,7 @@ var (
 	// Verbos e marcadores de afirmação técnica.
 	// Sintaxe de configuração/CLI (o classificador nem sempre a reconhece como comando).
 	configSyntaxRE = regexp.MustCompile(`(?i)(\bpeer\s+\S+\s+as-number\b|\bas-number\s+\d+|\bbgp\s+\d{1,10}\b|\brouter\s+bgp\s+\d+|(^|\s)/(routing|interface|ip|system)\s+\w+|\bip\s+route(-static)?\s+\S+|\b(display|show|undo)\s+\w+)`)
-	assertiveRE    = regexp.MustCompile(`(?i)\b(supports?|supported|configure[sd]?|configuring|enable[sd]?|use the command|run the command|is available|can be (configured|used|enabled)|example|procedure|steps?)\b`)
+	assertiveRE    = regexp.MustCompile(`(?i)\b(supports?|supported|configure[sd]?|configuring|enable[sd]?|use the command|run the command|is available|can be (configured|used|enabled)|example|procedure|steps?|suporta\p{L}*|suportad[oa]s?|configura\p{L}*|habilita\p{L}*|dispon[íi]vel|soporta\p{L}*|soportad[oa]s?|admite\p{L}*|admitid[oa]s?|disponibles?)\b`)
 )
 
 // assertsContent informa se o trecho afirma algo (comando CLI ou frase de
@@ -248,98 +277,61 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 
 	for _, p := range passages {
 		classification := classifier.Classify(p.Snippet, p.Domain)
-		lowerSnippet := strings.ToLower(p.Snippet)
 
-		// Fabricante da passagem (o SO do classificador é inferido e não é usado como prova)
-		vendorName := ""
-		if len(classification.Vendors) > 0 {
+		// Fabricante da passagem: prioriza o fabricante requerido quando verificado,
+		// evitando que um fabricante secundário citado no texto sequestre o sujeito.
+		vendorName := req.Vendor
+		if vendorName == "" && len(classification.Vendors) > 0 {
 			vendorName = classification.Vendors[0].Name
 		}
 
-		// 1. Vendor Match & Mismatch
-		vendorMatch := false
-		vendorMismatch := false
-		if len(req.Vendors) > 0 {
-			for _, v := range req.Vendors {
-				if strings.EqualFold(v, vendorName) {
-					vendorMatch = true
-					break
-				}
-			}
-			if vendorName != "" && !vendorMatch {
-				vendorMismatch = true
-			}
-		}
+		// Avaliação oracional vinculando sujeito (fabricante/modelo/firmware),
+		// predicado (afirmação/negação) e objeto (recursos pedidos).
+		assertion := analyzePassage(p.Snippet, req, classification.CLICommands)
+		vendorMatch := assertion.VendorMatch
+		modelMatch := assertion.ModelMatch
+		firmwareMatch := assertion.FirmwareMatch
+		featureMatch := assertion.CoAsserted || assertion.Refuted
 
-		// 2. Firmware: só a menção explícita da release no trecho conta. O
-		// classificador infere uma família de SO a partir do modelo (NE8000 → VRP),
-		// mas essa inferência é heurística e nunca prova a versão (auditoria V5).
-		firmwareMatch := false
+		// Se a consulta exige fabricante/firmware e a oração assertiva/refutativa
+		// não pertence a ele, a passagem é apenas menção fora de escopo.
+		vendorMismatch := len(req.Vendors) > 0 && !vendorMatch
 		versionMismatch := false
+		lowerSnippet := strings.ToLower(p.Snippet)
 		for _, fw := range req.Firmwares {
-			if mentionsFirmware(lowerSnippet, fw) {
-				firmwareMatch = true
-			}
-			if mentionsConflictingFirmware(lowerSnippet, fw) {
+			if mentionsConflictingFirmware(lowerSnippet, fw) && !firmwareMatch {
 				versionMismatch = true
 			}
 		}
 
-		// 3. Model Match
-		modelMatch := false
-		if len(req.Models) > 0 {
-			for _, m := range req.Models {
-				if hasToken(lowerSnippet, strings.ToLower(m)) {
-					modelMatch = true
-					break
-				}
-			}
-		}
-
-		// 4. Recursos e stance, por oração: um recurso é sustentado só pela
-		// oração que o afirma, e refutado só pela oração que o nega; recursos em
-		// orações diferentes não provam funcionamento conjunto.
-		assertion := analyzeAssertion(p.Snippet, req.Features, classification.CLICommands)
-		featureMatch := assertion.CoAsserted || assertion.Refuted
-
-		//   - outro fabricante ou release não prova nem refuta o cenário pedido;
-		//   - refutação: decide-se a aplicabilidade em ResolveClaimStatus, pelos
-		//     campos de escopo;
-		//   - sem oração que afirme todos os recursos pedidos: é menção.
 		stance := "mentions"
 		switch {
 		case vendorMismatch || versionMismatch:
 			stance = "mentions"
+		case assertion.Conflicted:
+			// Conflito explícito dentro do próprio trecho: registra a contestação,
+			// mas sem permitir que vire incompatibilidade unilateral.
+			stance = "refutes"
+			modelMatch = false
+			firmwareMatch = false
 		case assertion.Refuted:
 			stance = "refutes"
 		case assertion.CoAsserted:
 			stance = "supports"
 		}
 
-		// Identifica o tópico atômico do claim
+		// Identifica o tópico atômico do claim de forma consistente por consulta,
+		// garantindo que evidências de suporte e refutação da mesma consulta sejam
+		// confrontadas no mesmo claim.
 		claimTitle := query
 		claimStatement := fmt.Sprintf("Procedimento e diretrizes documentadas para %s", query)
-		if len(classification.CLICommands) > 0 {
-			firstCmd := classification.CLICommands[0]
-			switch {
-			case strings.Contains(firstCmd, "uplink") || strings.Contains(firstCmd, "port"):
-				claimTitle = "Configuração de Portas Uplink e Modos de Interface"
-				claimStatement = fmt.Sprintf("Sintaxe CLI para ativação e modulação de portas uplink em %s", vendorName)
-			case strings.Contains(firstCmd, "bgp") || strings.Contains(firstCmd, "peer"):
-				claimTitle = "Configuração e Peering de Sessões BGP"
-				claimStatement = fmt.Sprintf("Estabelecimento de sessões BGP e políticas de roteamento em %s", vendorName)
-			case strings.Contains(firstCmd, "vlan") || strings.Contains(firstCmd, "manage"):
-				claimTitle = "Gerenciamento de VLAN e Acesso Inband/Outband"
-				claimStatement = fmt.Sprintf("Definição de IPs de gerência e interfaces virtuais em %s", vendorName)
-			case strings.Contains(firstCmd, "ADD-ONU") || strings.Contains(firstCmd, "LST-ONU"):
-				claimTitle = "Provisionamento de ONUs via Comandos TL1"
-				claimStatement = "Comandos transacionais TL1 para cadastro, consulta e sinal óptico de ONUs"
-			default:
-				claimTitle = fmt.Sprintf("Configuração CLI: %s", firstCmd)
-				claimStatement = fmt.Sprintf("Comandos CLI citados nas fontes para o contexto %s (não validados)", vendorName)
-			}
-		} else if vendorName != "" {
+		if vendorName != "" {
 			claimTitle = fmt.Sprintf("%s — %s", vendorName, query)
+		}
+		if query == "" && len(classification.CLICommands) > 0 {
+			firstCmd := classification.CLICommands[0]
+			claimTitle = fmt.Sprintf("Configuração CLI: %s", firstCmd)
+			claimStatement = fmt.Sprintf("Comandos CLI citados nas fontes para o contexto %s (não validados)", vendorName)
 		}
 
 		claimKey := claimTitle

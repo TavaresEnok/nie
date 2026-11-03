@@ -20,7 +20,7 @@ COPY --from=web /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nie ./cmd/nie
 
 # ---------- Runtime ----------
-FROM alpine:3.22
+FROM alpine:3.22 AS runtime-base
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -g 10001 -S nie \
     && adduser -u 10001 -S -D -H -G nie nie \
@@ -38,3 +38,11 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=5 \
   CMD wget -qO- http://127.0.0.1:8080/api/health >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/nie"]
+
+# Optional OCR runtime; the default image keeps only the basic parsers.
+FROM runtime-base AS runtime-ocr
+USER root
+RUN apk add --no-cache poppler-utils tesseract-ocr tesseract-ocr-data-eng
+USER nie
+
+FROM runtime-base AS runtime

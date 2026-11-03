@@ -66,6 +66,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: ${NIE_DOCKER_TARGET:-runtime}
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,6 +87,12 @@ services:
       NIE_WAYBACK_ENABLED: "true"
       NIE_SOFTWARE_HERITAGE_ENABLED: "true"
       NIE_MENTIONS_DISCOVERY_ENABLED: "true"
+      NIE_AUTOMATIC_RESEARCH: ${NIE_AUTOMATIC_RESEARCH:-true}
+      NIE_MAX_RESEARCH_ROUNDS: ${NIE_MAX_RESEARCH_ROUNDS:-3}
+      NIE_OCR_ENABLED: ${NIE_OCR_ENABLED:-false}
+      NIE_OCR_MAX_PAGES: ${NIE_OCR_MAX_PAGES:-10}
+      NIE_OCR_LANGUAGE: ${NIE_OCR_LANGUAGE:-eng}
+      NIE_OCR_TIMEOUT: ${NIE_OCR_TIMEOUT:-45s}
       NIE_GITHUB_ENABLED: ${NIE_GITHUB_ENABLED:-false}
       NIE_GITHUB_TOKEN: ${NIE_GITHUB_TOKEN:-}
       NIE_API_TOKEN: ${NIE_API_TOKEN:-}
@@ -94,6 +101,18 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - nie_data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    profiles: ["edge"]
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
     restart: unless-stopped
 
 volumes:

@@ -9,6 +9,7 @@ import (
 
 	"nie/internal/discovery"
 	"nie/internal/domain"
+	"nie/internal/store"
 )
 
 type vendorsOut struct {
@@ -79,6 +80,49 @@ type gitSearchOut struct {
 }
 
 func registerFase2and3(api huma.API, s *Server) {
+	huma.Register(api, huma.Operation{OperationID: "list-claim-revisions", Method: http.MethodGet, Path: "/api/campaigns/{id}/claim-revisions", Summary: "Histórico preservado de afirmações, evidências e contradições"}, func(ctx context.Context, in *struct {
+		ID    string `path:"id"`
+		Limit int    `query:"limit" default:"100" minimum:"1" maximum:"500"`
+	}) (*struct{ Body []store.ClaimRevision }, error) {
+		if _, err := s.store.GetCampaign(ctx, in.ID); err != nil {
+			return nil, s.mapError(err)
+		}
+		revisions, err := s.store.ListClaimRevisions(ctx, in.ID, in.Limit)
+		if err != nil {
+			return nil, s.mapError(err)
+		}
+		return &struct{ Body []store.ClaimRevision }{Body: revisions}, nil
+	})
+	huma.Register(api, huma.Operation{OperationID: "list-document-changes", Method: http.MethodGet, Path: "/api/campaigns/{id}/changes", Summary: "Mudanças de hash observadas na mesma URL da campanha"}, func(ctx context.Context, in *campaignParam) (*struct{ Body []store.DocumentChange }, error) {
+		if _, err := s.store.GetCampaign(ctx, in.ID); err != nil {
+			return nil, s.mapError(err)
+		}
+		changes, err := s.store.ListDocumentChanges(ctx, in.ID)
+		if err != nil {
+			return nil, s.mapError(err)
+		}
+		return &struct{ Body []store.DocumentChange }{Body: changes}, nil
+	})
+	huma.Register(api, huma.Operation{OperationID: "list-research-questions", Method: http.MethodGet, Path: "/api/campaigns/{id}/questions", Summary: "Subperguntas planejadas da campanha e o estado de cada uma"}, func(ctx context.Context, in *campaignParam) (*struct{ Body []store.ResearchQuestion }, error) {
+		if _, err := s.store.GetCampaign(ctx, in.ID); err != nil {
+			return nil, s.mapError(err)
+		}
+		questions, err := s.store.ListResearchQuestions(ctx, in.ID)
+		if err != nil {
+			return nil, s.mapError(err)
+		}
+		return &struct{ Body []store.ResearchQuestion }{Body: questions}, nil
+	})
+	huma.Register(api, huma.Operation{OperationID: "list-research-rounds", Method: http.MethodGet, Path: "/api/campaigns/{id}/rounds", Summary: "Consultar decisões e buscas das rodadas automáticas"}, func(ctx context.Context, in *campaignParam) (*struct{ Body []store.ResearchRound }, error) {
+		if _, err := s.store.GetCampaign(ctx, in.ID); err != nil {
+			return nil, s.mapError(err)
+		}
+		rounds, err := s.store.ListResearchRounds(ctx, in.ID)
+		if err != nil {
+			return nil, s.mapError(err)
+		}
+		return &struct{ Body []store.ResearchRound }{Body: rounds}, nil
+	})
 	// Vendors
 	huma.Register(api, huma.Operation{
 		OperationID: "list-vendors", Method: http.MethodGet, Path: "/api/vendors",
@@ -138,27 +182,19 @@ func registerFase2and3(api huma.API, s *Server) {
 		// Enfileira as pistas investigativas adaptativas (AdaptiveInvestigationLeads)
 		// geradas para claims incompletas (contested, documented, unconfirmed) como
 		// tarefas de descoberta de 2ª rodada na fila de jobs persistente PostgreSQL.
-		// Cada pista consome orçamento de jobs (EnqueueDiscovery respeita max_urls e
-		// deduplica por consulta): no máximo um provedor web e um de código por pista.
-		webKind, codeKind := "", ""
-		switch {
-		case s.cfg.SearXNGURL != "":
-			webKind = "discover_web"
-		case s.cfg.MwmblURL != "":
-			webKind = "discover_mwmbl"
+		// As pesquisas têm orçamento próprio e usam somente provedores já
+		// selecionados na campanha e ainda habilitados no servidor.
+		kinds, err := s.store.CampaignDiscoveryKinds(ctx, camp.ID)
+		if err != nil {
+			return nil, s.internal(err)
 		}
-		switch {
-		case s.cfg.GitHubEnabled:
-			codeKind = "discover_github"
-		case s.cfg.SoftwareHeritageEnabled:
-			codeKind = "discover_swh"
-		}
+		available := map[string]bool{"discover_web": s.cfg.SearXNGURL != "", "discover_mwmbl": s.cfg.MwmblURL != "", "discover_github": s.cfg.GitHubEnabled, "discover_gitlab": s.cfg.GitLabEnabled, "discover_swh": s.cfg.SoftwareHeritageEnabled, "discover_commoncrawl": s.cfg.CommonCrawlEnabled}
 		for _, lead := range dossier.InvestigationLeads {
 			if lead.SearchLead == "" {
 				continue
 			}
-			for _, kind := range []string{webKind, codeKind} {
-				if kind == "" {
+			for _, kind := range kinds {
+				if !available[kind] {
 					continue
 				}
 				if _, err := s.store.EnqueueDiscovery(ctx, camp.ID, kind, lead.SearchLead); err != nil {

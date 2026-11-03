@@ -1,0 +1,5 @@
+# Proxy reverso opcional. O NIE continua servindo o painel e a API na porta interna.
+:443 {
+	encode gzip
+	reverse_proxy app:8080
+}

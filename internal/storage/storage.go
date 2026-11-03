@@ -16,6 +16,20 @@ type Store struct {
 	root string
 }
 
+var ErrIntegrity = errors.New("objeto CAS corrompido")
+
+func validHash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for _, r := range hash {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 type Result struct {
 	SHA256 string
 	Size   int64
@@ -45,8 +59,11 @@ func (s *Store) Put(data []byte) (Result, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
 	final := s.Path(hash)
-	if fi, err := os.Stat(final); err == nil && fi.Size() == int64(len(data)) {
-		return Result{SHA256: hash, Size: fi.Size(), Path: final}, nil
+	if f, err := s.OpenVerified(hash); err == nil {
+		_ = f.Close()
+		return Result{SHA256: hash, Size: int64(len(data)), Path: final}, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Result{}, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(final), 0o750); err != nil {
@@ -78,26 +95,47 @@ func (s *Store) Put(data []byte) (Result, error) {
 	if err := f.Close(); err != nil {
 		return Result{}, fmt.Errorf("fechar objeto: %w", err)
 	}
-	if err := os.Rename(tmp, final); err != nil {
-		// Outro worker pode ter gravado o mesmo hash entre o stat e o rename.
-		if fi, statErr := os.Stat(final); statErr == nil && fi.Size() == int64(len(data)) {
-			return Result{SHA256: hash, Size: fi.Size(), Path: final}, nil
+	// Hard-link publication is atomic and never overwrites an existing object.
+	if err := os.Link(tmp, final); err != nil {
+		if existing, verifyErr := s.OpenVerified(hash); verifyErr == nil {
+			existing.Close()
+			return Result{SHA256: hash, Size: int64(len(data)), Path: final}, nil
 		}
-		return Result{}, fmt.Errorf("rename atômico: %w", err)
+		return Result{}, fmt.Errorf("publicar objeto imutável: %w", err)
 	}
-	cleanup = false
 	return Result{SHA256: hash, Size: int64(len(data)), Path: final}, nil
 }
 
 func (s *Store) Open(hash string) (io.ReadCloser, error) {
-	if len(hash) < 4 {
+	return s.OpenVerified(hash)
+}
+
+func (s *Store) OpenVerified(hash string) (*os.File, error) {
+	if !validHash(hash) {
 		return nil, errors.New("hash inválido")
 	}
-	return os.Open(s.Path(hash))
+	f, err := os.Open(s.Path(hash))
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != hash {
+		f.Close()
+		return nil, fmt.Errorf("%w: %s", ErrIntegrity, hash)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func (s *Store) Has(hash string) bool {
-	if len(hash) < 4 {
+	if !validHash(hash) {
 		return false
 	}
 	_, err := os.Stat(s.Path(hash))

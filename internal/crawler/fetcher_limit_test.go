@@ -56,6 +56,19 @@ func TestNativeExecutorAppliesTaskMaxBytes(t *testing.T) {
 	}
 }
 
+func TestConditionalFetchNotModified(t *testing.T) {
+	var match string
+	f := newTestFetcher(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		match = r.Header.Get("If-None-Match")
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	res, err := NewNativeExecutor(f).Execute(context.Background(), domain.FetchTask{URL: "http://docs.example.org/manual", IfNoneMatch: `"v1"`})
+	if err != nil || res.StatusCode != http.StatusNotModified || match != `"v1"` || len(res.RawContent) != 0 {
+		t.Fatalf("res=%+v err=%v match=%s", res, err, match)
+	}
+}
+
 // Regressão da auditoria V5: robots.txt que redireciona (→ /policy.txt) não pode
 // fazer a verificação de robots chamar a si mesma; a política redirecionada vale.
 func TestRobotsRedirectDoesNotRecurse(t *testing.T) {

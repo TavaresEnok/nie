@@ -11,6 +11,7 @@ import (
 )
 
 type GitHub struct {
+	base   string
 	token  string
 	client *http.Client
 }
@@ -39,7 +40,7 @@ func (g *GitHub) SearchReadmes(ctx context.Context, query string, limit int) ([]
 	if limit <= 0 || limit > 10 {
 		limit = 5
 	}
-	searchURL := "https://api.github.com/search/repositories?q=" + url.QueryEscape(query) +
+	searchURL := g.endpoint("/search/repositories?q=") + url.QueryEscape(query) +
 		"&sort=stars&order=desc&per_page=" + fmt.Sprint(limit)
 	var repos struct {
 		Items []githubRepo `json:"items"`
@@ -53,7 +54,7 @@ func (g *GitHub) SearchReadmes(ctx context.Context, query string, limit int) ([]
 			DownloadURL string `json:"download_url"`
 			HTMLURL     string `json:"html_url"`
 		}
-		endpoint := "https://api.github.com/repos/" + repo.FullName + "/readme"
+		endpoint := g.endpoint("/repos/" + repo.FullName + "/readme")
 		if err := g.getJSON(ctx, endpoint, &readme); err != nil {
 			continue
 		}
@@ -72,6 +73,14 @@ func (g *GitHub) SearchReadmes(ctx context.Context, query string, limit int) ([]
 		})
 	}
 	return out, nil
+}
+
+func (g *GitHub) endpoint(path string) string {
+	base := "https://api.github.com"
+	if strings.TrimSpace(g.base) != "" {
+		base = strings.TrimRight(g.base, "/")
+	}
+	return base + path
 }
 
 func (g *GitHub) getJSON(ctx context.Context, endpoint string, dst any) error {

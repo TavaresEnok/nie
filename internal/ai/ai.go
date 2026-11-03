@@ -173,7 +173,7 @@ func (s *Service) PlanAdaptiveLeads(ctx context.Context, query string, existingC
 		}
 	}
 
-	if len(leads) == 0 {
+	if len(existingClaims) == 0 {
 		leads = append(leads, AdaptiveInvestigationLead{
 			ResearchQuestion: query,
 			Hypothesis:       fmt.Sprintf("Procedimento padrão documentado para %s", query),

@@ -17,6 +17,7 @@ import (
 	"nie/internal/discovery"
 	"nie/internal/domain"
 	"nie/internal/evidence"
+	"nie/internal/extract"
 	"nie/internal/store"
 	"nie/internal/urlutil"
 	"nie/internal/version"
@@ -67,8 +68,11 @@ func New(st *store.Store, cfg config.Config, logger *slog.Logger) http.Handler {
 	registerCampaigns(api, s)
 	registerSearch(api, s)
 	registerDocuments(api, s)
+	registerExtractions(api, s)
+	registerOriginalDownload(mux, s)
 	registerJobs(api, s)
 	registerFase2and3(api, s)
+	registerExternal(api, s)
 
 	mux.Handle("/", webui.Handler(cfg.WebDir))
 	return s.middleware(mux)
@@ -166,6 +170,15 @@ func registerMeta(api huma.API, s *Server) {
 			Version                   string `json:"version"`
 			WebDiscovery              bool   `json:"web_discovery"`
 			GitDiscovery              bool   `json:"git_discovery"`
+			GitLabDiscovery           bool   `json:"gitlab_discovery"`
+			CommonCrawlDiscovery      bool   `json:"commoncrawl_discovery"`
+			ZoektConfigured           bool   `json:"zoekt_configured"`
+			OpenSearchConfigured      bool   `json:"opensearch_configured"`
+			TikaConfigured            bool   `json:"tika_configured"`
+			DoclingConfigured         bool   `json:"docling_configured"`
+			ArchiveBoxConfigured      bool   `json:"archivebox_configured"`
+			ResearcherConfigured      bool   `json:"researcher_configured"`
+			PGVectorEnabled           bool   `json:"pgvector_enabled"`
 			MwmblDiscovery            bool   `json:"mwmbl_discovery"`
 			WaybackEnabled            bool   `json:"wayback_enabled"`
 			SoftwareHeritageDiscovery bool   `json:"software_heritage_discovery"`
@@ -173,6 +186,7 @@ func registerMeta(api huma.API, s *Server) {
 			ScrapyConfigured          bool   `json:"scrapy_configured"`
 			Crawl4AIConfigured        bool   `json:"crawl4ai_configured"`
 			AuthRequired              bool   `json:"auth_required"`
+			OCRAvailable              bool   `json:"ocr_available"`
 		}
 	}
 	huma.Register(api, huma.Operation{
@@ -182,6 +196,15 @@ func registerMeta(api huma.API, s *Server) {
 		o.Body.Version = version.Version
 		o.Body.WebDiscovery = s.cfg.SearXNGURL != ""
 		o.Body.GitDiscovery = s.cfg.GitHubEnabled
+		o.Body.GitLabDiscovery = s.cfg.GitLabEnabled
+		o.Body.CommonCrawlDiscovery = s.cfg.CommonCrawlEnabled
+		o.Body.ZoektConfigured = s.cfg.ZoektURL != ""
+		o.Body.OpenSearchConfigured = s.cfg.OpenSearchURL != ""
+		o.Body.TikaConfigured = s.cfg.TikaCommand != ""
+		o.Body.DoclingConfigured = s.cfg.DoclingCommand != ""
+		o.Body.ArchiveBoxConfigured = s.cfg.ArchiveBoxDir != ""
+		o.Body.ResearcherConfigured = s.cfg.GPTResearcherURL != ""
+		o.Body.PGVectorEnabled = s.cfg.PGVector
 		o.Body.MwmblDiscovery = s.cfg.MwmblURL != ""
 		o.Body.WaybackEnabled = s.cfg.WaybackEnabled
 		o.Body.SoftwareHeritageDiscovery = s.cfg.SoftwareHeritageEnabled
@@ -189,6 +212,7 @@ func registerMeta(api huma.API, s *Server) {
 		o.Body.ScrapyConfigured = s.cfg.ScrapyURL != ""
 		o.Body.Crawl4AIConfigured = s.cfg.Crawl4AIURL != ""
 		o.Body.AuthRequired = s.cfg.APIToken != ""
+		o.Body.OCRAvailable = s.cfg.OCREnabled && extract.NewOCRService().CanOCRPDF()
 		return o, nil
 	})
 }
@@ -213,17 +237,19 @@ func registerStats(api huma.API, s *Server) {
 
 type campaignInput struct {
 	Body struct {
-		Query             string   `json:"query" required:"true" minLength:"3" maxLength:"500"`
-		SeedURLs          []string `json:"seed_urls,omitempty" maxItems:"20"`
-		MaxDepth          int      `json:"max_depth,omitempty"`
-		MaxURLs           int      `json:"max_urls,omitempty"`
-		MaxDomains        int      `json:"max_domains,omitempty"`
-		MaxBytes          int64    `json:"max_bytes,omitempty"`
-		DomainInterval    int      `json:"min_domain_interval_seconds,omitempty"`
-		UseWebDiscovery   *bool    `json:"use_web_discovery,omitempty"`
-		UseGitDiscovery   *bool    `json:"use_git_discovery,omitempty"`
-		UseMwmblDiscovery *bool    `json:"use_mwmbl_discovery,omitempty"`
-		UseSWHDiscovery   *bool    `json:"use_swh_discovery,omitempty"`
+		Query                   string   `json:"query" required:"true" minLength:"3" maxLength:"500"`
+		SeedURLs                []string `json:"seed_urls,omitempty" maxItems:"20"`
+		MaxDepth                int      `json:"max_depth,omitempty"`
+		MaxURLs                 int      `json:"max_urls,omitempty"`
+		MaxDomains              int      `json:"max_domains,omitempty"`
+		MaxBytes                int64    `json:"max_bytes,omitempty"`
+		DomainInterval          int      `json:"min_domain_interval_seconds,omitempty"`
+		UseWebDiscovery         *bool    `json:"use_web_discovery,omitempty"`
+		UseGitDiscovery         *bool    `json:"use_git_discovery,omitempty"`
+		UseGitLabDiscovery      *bool    `json:"use_gitlab_discovery,omitempty"`
+		UseCommonCrawlDiscovery *bool    `json:"use_commoncrawl_discovery,omitempty"`
+		UseMwmblDiscovery       *bool    `json:"use_mwmbl_discovery,omitempty"`
+		UseSWHDiscovery         *bool    `json:"use_swh_discovery,omitempty"`
 	}
 }
 
@@ -325,7 +351,21 @@ func registerCampaigns(api huma.API, s *Server) {
 		if git && !s.cfg.GitHubEnabled {
 			return nil, huma.Error400BadRequest("descoberta GitHub solicitada, mas o adaptador está desabilitado")
 		}
-		if len(seeds) == 0 && !web && !git && !mwmbl && !swh {
+		gitlab := s.cfg.GitLabEnabled
+		if in.Body.UseGitLabDiscovery != nil {
+			gitlab = *in.Body.UseGitLabDiscovery
+		}
+		if gitlab && !s.cfg.GitLabEnabled {
+			return nil, huma.Error400BadRequest("descoberta GitLab solicitada, mas o adaptador está desabilitado")
+		}
+		commoncrawl := s.cfg.CommonCrawlEnabled
+		if in.Body.UseCommonCrawlDiscovery != nil {
+			commoncrawl = *in.Body.UseCommonCrawlDiscovery
+		}
+		if commoncrawl && !s.cfg.CommonCrawlEnabled {
+			return nil, huma.Error400BadRequest("Common Crawl solicitado, mas o adaptador está desabilitado")
+		}
+		if len(seeds) == 0 && !web && !git && !gitlab && !mwmbl && !swh && !commoncrawl {
 			return nil, huma.Error400BadRequest("informe ao menos uma seed ou habilite uma descoberta externa")
 		}
 
@@ -343,6 +383,11 @@ func registerCampaigns(api huma.API, s *Server) {
 				s.logger.Error("enfileirar descoberta github", "campaign", c.ID, "err", err)
 			}
 		}
+		if gitlab {
+			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_gitlab", query); err != nil {
+				s.logger.Error("enfileirar descoberta gitlab", "campaign", c.ID, "err", err)
+			}
+		}
 		if mwmbl {
 			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_mwmbl", query); err != nil {
 				s.logger.Error("enfileirar descoberta mwmbl", "campaign", c.ID, "err", err)
@@ -351,6 +396,11 @@ func registerCampaigns(api huma.API, s *Server) {
 		if swh {
 			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_swh", query); err != nil {
 				s.logger.Error("enfileirar descoberta swh", "campaign", c.ID, "err", err)
+			}
+		}
+		if commoncrawl {
+			if _, err := s.store.EnqueueDiscovery(ctx, c.ID, "discover_commoncrawl", query); err != nil {
+				s.logger.Error("enfileirar descoberta common crawl", "campaign", c.ID, "err", err)
 			}
 		}
 		_ = s.store.FinishIfIdle(ctx, c.ID)

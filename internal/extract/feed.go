@@ -41,7 +41,7 @@ func Feed(base *url.URL, body []byte) (Result, error) {
 	dec.CharsetReader = charset.NewReaderLabel
 	dec.Strict = false
 
-	res := Result{MIME: "application/xml"}
+	res := Result{MIME: "application/xml", Parser: "nie-feed", ParserVersion: "1.0.0"}
 	seen := make(map[string]struct{})
 	var text strings.Builder
 	var stack []string

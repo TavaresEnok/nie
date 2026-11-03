@@ -72,7 +72,7 @@ func (n *NativeExecutor) Name() string { return "native" }
 
 func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*domain.FetchResult, error) {
 	start := time.Now()
-	resp, err := n.fetcher.FetchWithLimit(ctx, task.URL, task.MaxBytes)
+	resp, err := n.fetcher.FetchConditional(ctx, task.URL, task.MaxBytes, task.IfNoneMatch, task.IfModifiedSince)
 	duration := time.Since(start)
 
 	if err != nil {
@@ -82,6 +82,18 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 			Duration:     duration,
 			Error:        err.Error(),
 		}, err
+	}
+
+	if resp.StatusCode == http.StatusNotModified {
+		return &domain.FetchResult{
+			TaskID:       task.ID,
+			EffectiveURL: resp.URL,
+			StatusCode:   resp.StatusCode,
+			ETag:         resp.Header.Get("ETag"),
+			LastModified: resp.Header.Get("Last-Modified"),
+			Duration:     duration,
+			Metadata:     map[string]any{"executor": "native", "not_modified": true},
+		}, nil
 	}
 
 	finalURL, _ := url.Parse(resp.URL)
@@ -116,13 +128,15 @@ func (n *NativeExecutor) Execute(ctx context.Context, task domain.FetchTask) (*d
 		ExtractedMentions: mentions,
 		Duration:          duration,
 		Metadata: map[string]any{
-			"executor":   "native",
-			"byte_count": len(resp.Body),
-			"title":      ex.Title,
-			"mime":       ex.MIME,
-			"passages":   ex.Passages,
-			"link_kind":  ex.LinkKind,
-			"feed_links": ex.FeedLinks,
+			"executor":       "native",
+			"byte_count":     len(resp.Body),
+			"title":          ex.Title,
+			"mime":           ex.MIME,
+			"passages":       ex.Passages,
+			"parser":         ex.Parser,
+			"parser_version": ex.ParserVersion,
+			"link_kind":      ex.LinkKind,
+			"feed_links":     ex.FeedLinks,
 		},
 	}, nil
 }
