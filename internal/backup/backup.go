@@ -28,6 +28,24 @@ type Options struct {
 	DatabaseURL string
 	DataDir     string
 	ConfigFiles []string
+	KeepDaily   int
+	KeepWeekly  int
+	KeepMonthly int
+}
+
+// RequireOffsiteRepository recusa repositório vazio ou local. A cópia de
+// backup só conta quando o Restic aponta para fora deste host.
+func RequireOffsiteRepository() error {
+	repo := strings.TrimSpace(os.Getenv("RESTIC_REPOSITORY"))
+	password := strings.TrimSpace(os.Getenv("RESTIC_PASSWORD"))
+	if repo == "" || password == "" {
+		return errors.New("defina RESTIC_REPOSITORY remoto e RESTIC_PASSWORD")
+	}
+	lower := strings.ToLower(repo)
+	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, ".") || strings.HasPrefix(lower, "file:") || strings.HasPrefix(lower, "local:") {
+		return errors.New("repositório local não conta como cópia fora do host")
+	}
+	return nil
 }
 
 type File struct {
@@ -307,6 +325,15 @@ func Create(ctx context.Context, opts Options) (string, error) {
 	}
 	if id == "" {
 		return "", errors.New("Restic não retornou ID do snapshot")
+	}
+	if opts.KeepDaily > 0 || opts.KeepWeekly > 0 || opts.KeepMonthly > 0 {
+		forget := exec.CommandContext(ctx, "restic", "forget", "--prune", "--tag", "nie-backup-v1",
+			"--keep-daily", fmt.Sprintf("%d", opts.KeepDaily),
+			"--keep-weekly", fmt.Sprintf("%d", opts.KeepWeekly),
+			"--keep-monthly", fmt.Sprintf("%d", opts.KeepMonthly))
+		if _, err := run(forget); err != nil {
+			return "", err
+		}
 	}
 	return id, nil
 }

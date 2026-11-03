@@ -76,6 +76,31 @@ func TestMetaAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestPublicExposureWithoutToken(t *testing.T) {
+	if err := (config.Config{PublicExposure: true}).Validate(); err == nil {
+		t.Fatal("exposição pública sem token deveria ser recusada")
+	}
+	if err := (config.Config{PublicExposure: true, APIToken: "t"}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (config.Config{}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h := New(nil, config.Config{PublicExposure: true}, discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/api/campaigns", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, corpo = %s", w.Code, w.Body.String())
+	}
+	health := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	hw := httptest.NewRecorder()
+	h.ServeHTTP(hw, health)
+	if hw.Code == http.StatusUnauthorized {
+		t.Fatal("health da exposição pública deveria responder")
+	}
+}
+
 func TestUnauthorizedCampaign(t *testing.T) {
 	h := New(nil, config.Config{APIToken: "segredo"}, discardLogger())
 	req := httptest.NewRequest(http.MethodGet, "/api/campaigns", nil)

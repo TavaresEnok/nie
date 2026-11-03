@@ -17,7 +17,8 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY --from=web /src/internal/webui/dist ./internal/webui/dist
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nie ./cmd/nie
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nie ./cmd/nie \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/nie-maint ./cmd/nie-maint
 
 # ---------- Runtime ----------
 FROM alpine:3.22 AS runtime-base
@@ -46,3 +47,10 @@ RUN apk add --no-cache poppler-utils tesseract-ocr tesseract-ocr-data-eng
 USER nie
 
 FROM runtime-base AS runtime
+
+# Backup operacional. A imagem padrão do aplicativo não carrega Restic nem pg_dump.
+FROM postgres:18-alpine AS backup
+RUN apk add --no-cache restic ca-certificates
+COPY --from=build /out/nie-maint /usr/local/bin/nie-maint
+USER postgres
+ENTRYPOINT ["/usr/local/bin/nie-maint"]

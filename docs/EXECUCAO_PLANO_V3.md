@@ -102,6 +102,30 @@ Ficaram ligados ao núcleo, cada um só quando a variável correspondente existe
 
 Nenhum desses caminhos foi ensaiado contra os serviços públicos reais nesta máquina. StormCrawler, Nutch, Heritrix, RAGFlow e Onyx continuam de fora: o plano os trata como alternativa de escala ou segunda fonte de verdade, e não há medição que os justifique.
 
+## Correção da auditoria V7
+
+Pergunta, hipótese, alegação não verificada e frase declarada falsa deixam de receber `supports`. A frase declarada falsa refuta o recurso embutido. Conflito explícito continua contestado, mesmo quando a frase usa "whether" ou "se". A evidência guarda o texto do trecho; o recorte com `<mark>` fica só na busca. O enunciado da claim nomeia cada recurso e não chama a consulta de procedimento já documentado.
+
+`NIE_PUBLIC_EXPOSURE=true` sem `NIE_API_TOKEN` impede o processo de subir e nega a API, exceto `/api/health`. O perfil Compose `edge` encerra o Caddy se o token estiver vazio. O Compose padrão, preso a `127.0.0.1:8080`, continua aceitando token vazio.
+
+Isso não certifica implicação textual geral e não substitui a campanha pública.
+
+## Correção seguinte da auditoria V7
+
+Cada recurso da consulta vira uma proposição própria. A proposição composta só fica sustentada quando os recursos são afirmados na mesma oração. `applicable` exige `operational_validation=lab_validated`; escopo documental oficial permanece `sustained` ou `corroborated` com aplicabilidade indeterminada.
+
+ArchiveBox só executa com `NIE_ARCHIVEBOX_PROXY`. A URL e qualquer endereço resolvido precisam ser públicos, e o redirecionamento para host privado é recusado antes do comando. Os workers Scrapy e de navegador conferem o destino de cada redirecionamento. O markdown do Crawl4AI, quando o pacote existe, converte HTML já coletado por esse caminho; a biblioteca não busca a URL.
+
+O alvo Docker `backup` inclui `nie-maint`, `pg_dump` do PostgreSQL 18 e Restic. `nie-maint backup` recusa repositório local, aplica retenção diária, semanal e mensal, e o perfil Compose `backup` fica fora do stack padrão.
+
+A bateria das 20 perguntas do arquivo mestre foi ensaiada com textos sintéticos que não afirmam o fato, mais um caso fora de telecom. Isso não é campanha pública nem comparação com busca tradicional em fontes reais.
+
+## Busca em árvore e por sentido
+
+A rodada de investigação agora puxa trechos dos documentos ligados por aresta às URLs já encontradas. Menções sem link vão para todos os descobertos ligados na campanha, não só para o primeiro. Links do extrator e do navegador entram juntos na mesma fila. Zoekt e OpenSearch, quando configurados, devolvem URLs para essa fila; o PostgreSQL continua dono dela.
+
+`NIE_EMBED_URL` com `NIE_PGVECTOR=true` grava vetores de 768 dimensões e a rodada mistura esses vizinhos à busca lexical. Sem o endpoint ou sem a extensão, a busca lexical segue. Nenhum vetor foi gerado nesta máquina. StormCrawler, Nutch e Heritrix continuam de fora para não abrir uma segunda fila.
+
 ## O que ainda falta para o produto integral
 
 ### Encerramento da última tarefa e pausa solicitada

@@ -96,6 +96,7 @@ services:
       NIE_GITHUB_ENABLED: ${NIE_GITHUB_ENABLED:-false}
       NIE_GITHUB_TOKEN: ${NIE_GITHUB_TOKEN:-}
       NIE_API_TOKEN: ${NIE_API_TOKEN:-}
+      NIE_PUBLIC_EXPOSURE: ${NIE_PUBLIC_EXPOSURE:-false}
       NIE_LOG_LEVEL: ${NIE_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:8080:8080"
@@ -108,12 +109,43 @@ services:
     profiles: ["edge"]
     depends_on:
       - app
+    environment:
+      NIE_API_TOKEN: ${NIE_API_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$NIE_API_TOKEN" ]; then
+          echo "perfil edge recusado: defina NIE_API_TOKEN antes de publicar as portas 80 e 443" >&2
+          exit 1
+        fi
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
     restart: unless-stopped
+
+  backup:
+    profiles: ["backup"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NIE_DATABASE_URL: postgres://nie:${NIE_DB_PASSWORD:-nie}@postgres:5432/nie?sslmode=disable
+      NIE_DATA_DIR: /data
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      NIE_BACKUP_KEEP_DAILY: ${NIE_BACKUP_KEEP_DAILY:-7}
+      NIE_BACKUP_KEEP_WEEKLY: ${NIE_BACKUP_KEEP_WEEKLY:-4}
+      NIE_BACKUP_KEEP_MONTHLY: ${NIE_BACKUP_KEEP_MONTHLY:-6}
+    volumes:
+      - nie_data:/data:ro
+    restart: "no"
 
 volumes:
   nie_pgdata:

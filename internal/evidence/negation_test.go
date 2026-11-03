@@ -60,8 +60,8 @@ func TestQualifiedSupportIsNotProof(t *testing.T) {
 // Controle: a afirmação positiva e completa continua sendo aceita.
 func TestPlainAffirmativeSupportStillSustained(t *testing.T) {
 	for _, c := range claimsFor(t, "Huawei NE8000 VRP v8 supports BGP. Configure it with: bgp 65000 and peer 10.0.0.2 as-number 65001") {
-		if c.Status != "sustained" || c.Applicability != "applicable" {
-			t.Errorf("afirmação positiva oficial e completa deve ser sustained/applicable, obteve %s/%s", c.Status, c.Applicability)
+		if c.Status != "sustained" || c.Applicability != "indeterminate" {
+			t.Errorf("afirmação positiva oficial deve ser sustained/indeterminate sem laboratório, obteve %s/%s", c.Status, c.Applicability)
 		}
 	}
 }

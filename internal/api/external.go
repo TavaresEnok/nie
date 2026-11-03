@@ -89,7 +89,7 @@ func registerExternal(api huma.API, s *Server) {
 			Status string `json:"status"`
 		}
 	}, error) {
-		if err := archive.Add(ctx, s.cfg.ArchiveBoxDir, in.Body.URL); err != nil {
+		if err := archive.Add(ctx, s.cfg.ArchiveBoxDir, s.cfg.ArchiveBoxProxy, in.Body.URL); err != nil {
 			return nil, huma.Error400BadRequest(err.Error())
 		}
 		out := &struct {

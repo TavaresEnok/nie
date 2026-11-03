@@ -107,6 +107,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 
 func (s *Server) authorized(r *http.Request) bool {
 	if s.cfg.APIToken == "" {
+		if s.cfg.PublicExposure && strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/health" {
+			return false
+		}
 		return true
 	}
 	switch r.URL.Path {
@@ -179,6 +182,7 @@ func registerMeta(api huma.API, s *Server) {
 			ArchiveBoxConfigured      bool   `json:"archivebox_configured"`
 			ResearcherConfigured      bool   `json:"researcher_configured"`
 			PGVectorEnabled           bool   `json:"pgvector_enabled"`
+			SemanticConfigured        bool   `json:"semantic_configured"`
 			MwmblDiscovery            bool   `json:"mwmbl_discovery"`
 			WaybackEnabled            bool   `json:"wayback_enabled"`
 			SoftwareHeritageDiscovery bool   `json:"software_heritage_discovery"`
@@ -205,6 +209,7 @@ func registerMeta(api huma.API, s *Server) {
 		o.Body.ArchiveBoxConfigured = s.cfg.ArchiveBoxDir != ""
 		o.Body.ResearcherConfigured = s.cfg.GPTResearcherURL != ""
 		o.Body.PGVectorEnabled = s.cfg.PGVector
+		o.Body.SemanticConfigured = s.cfg.PGVector && s.cfg.EmbedURL != ""
 		o.Body.MwmblDiscovery = s.cfg.MwmblURL != ""
 		o.Body.WaybackEnabled = s.cfg.WaybackEnabled
 		o.Body.SoftwareHeritageDiscovery = s.cfg.SoftwareHeritageEnabled

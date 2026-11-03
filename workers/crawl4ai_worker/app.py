@@ -170,6 +170,36 @@ def health():
         "capabilities": ["browser", "markdown", "ssrf_guard", "subresource_firewall"]
     }
 
+def assert_public_redirect(current: str, location: str) -> str:
+    target = urljoin(current, location)
+    validate_public_target(target)
+    return target
+
+
+def crawl4ai_markdown(html: str):
+    """Converte HTML já coletado. O Crawl4AI não busca a URL: a coleta passou pelo firewall."""
+    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+
+    generated = DefaultMarkdownGenerator().generate_markdown(html)
+    text = getattr(generated, "raw_markdown", None) or str(generated)
+    return text.strip()
+
+
+def render_markdown(html: str, soup: BeautifulSoup, converter=None) -> str:
+    if converter is not None:
+        text = converter(html)
+        if text and str(text).strip():
+            return str(text)
+    if CRAWL4AI_AVAILABLE and converter is None:
+        try:
+            text = crawl4ai_markdown(html)
+            if text:
+                return text
+        except Exception:
+            pass
+    return html_to_markdown(soup)
+
+
 def html_to_markdown(soup: BeautifulSoup) -> str:
     for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
         tag.decompose()
@@ -279,7 +309,7 @@ async def crawl(req: CrawlRequest):
                 loc = resp.headers.get("Location")
                 if not loc:
                     break
-                curr_url = urljoin(curr_url, loc)
+                curr_url = assert_public_redirect(curr_url, loc)
                 continue
             break
 
@@ -294,7 +324,7 @@ async def crawl(req: CrawlRequest):
 
     # P0-02: Processa html_content (tanto do browser quanto do fallback HTTP)
     soup = BeautifulSoup(html_content, "html.parser")
-    markdown = html_to_markdown(soup)
+    markdown = render_markdown(html_content, soup)
 
     links = []
     base_url = effective_url

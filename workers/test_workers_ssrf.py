@@ -170,6 +170,34 @@ class TestWorkerSecurityAndExtraction(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 scrapy_validate(url)
 
+    def test_redirect_to_private_host_is_rejected(self):
+        from workers.crawl4ai_worker.app import assert_public_redirect
+
+        with self.assertRaises(HTTPException):
+            assert_public_redirect("https://docs.example/manual", "http://127.0.0.1/secret")
+        with self.assertRaises(HTTPException):
+            assert_public_redirect("https://docs.example/manual", "http://169.254.169.254/latest/meta-data/")
+
+    def test_dns_answer_with_private_address_is_rejected(self):
+        import socket
+        from unittest.mock import patch
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.1.1", 443))]
+
+        with patch("workers.crawl4ai_worker.app.socket.getaddrinfo", fake_getaddrinfo):
+            with self.assertRaises(HTTPException):
+                crawl_validate("https://rebind.example/a")
+
+    def test_markdown_can_use_crawl4ai_on_already_fetched_html(self):
+        from workers.crawl4ai_worker.app import render_markdown
+
+        html = "<html><body><p>Atomic fact</p></body></html>"
+        soup = BeautifulSoup(html, "html.parser")
+        text = render_markdown(html, soup, converter=lambda raw: "FROM-CRAWL4AI " + raw)
+        self.assertTrue(text.startswith("FROM-CRAWL4AI"))
+        self.assertIn("Atomic fact", text)
+
     def test_html_content_markdown_extraction_success(self):
         # Simula HTML rico que teria sido renderizado por JavaScript
         js_rendered_html = """

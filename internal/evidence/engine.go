@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 
@@ -135,9 +136,10 @@ func ParseRequirements(query string) TargetRequirements {
 //     recuperação lexical, não prova, e nunca conta como origem.
 //   - Uma evidência está "escopada" quando ela mesma comprova fabricante, modelo,
 //     firmware e recurso (campos estruturados; notas de texto são ignoradas).
-//   - sustained/applicable: uma evidência oficial que é, ela própria, escopada.
-//   - corroborated/applicable: >= 2 origens independentes, cada uma com
-//     evidência escopada (a origem oficial escopada já basta pela regra acima).
+//   - sustained: uma evidência oficial que é, ela própria, escopada.
+//   - corroborated: >= 2 origens independentes, cada uma com evidência escopada.
+//   - applicable só com OperationalValidation lab_validated. Heurística lexical
+//     não certifica aplicação operacional.
 //   - corroborated/indeterminate: >= 2 origens independentes que sustentam, mas
 //     sem escopo comprovado.
 //   - documented/indeterminate: há documento oficial que sustenta, sem escopo.
@@ -239,10 +241,10 @@ func (e *Engine) ResolveClaimStatus(claim *domain.Claim, evidences []domain.Evid
 		claim.Applicability = "indeterminate"
 	case officialScoped:
 		claim.Status = "sustained"
-		claim.Applicability = "applicable"
+		claim.Applicability = documentaryApplicability(claim)
 	case e.tracker.CountIndependentOrigins(scopedFP, scopedDom) >= 2:
 		claim.Status = "corroborated"
-		claim.Applicability = "applicable"
+		claim.Applicability = documentaryApplicability(claim)
 	case hasOfficialSupport:
 		// Manual legítimo, sem comprovar o escopo (modelo/firmware/recurso) pedido.
 		claim.Status = "documented"
@@ -260,6 +262,55 @@ var (
 	assertiveRE    = regexp.MustCompile(`(?i)\b(supports?|supported|configure[sd]?|configuring|enable[sd]?|use the command|run the command|is available|can be (configured|used|enabled)|example|procedure|steps?|suporta\p{L}*|suportad[oa]s?|configura\p{L}*|habilita\p{L}*|dispon[íi]vel|soporta\p{L}*|soportad[oa]s?|admite\p{L}*|admitid[oa]s?|disponibles?)\b`)
 )
 
+// canonicalPassage devolve o texto do trecho, nunca o recorte HTML da busca.
+func documentaryApplicability(claim *domain.Claim) string {
+	if claim.OperationalValidation == "lab_validated" {
+		return "applicable"
+	}
+	return "indeterminate"
+}
+
+func canonicalPassage(p domain.SearchResult) string {
+	if strings.TrimSpace(p.Text) != "" {
+		return p.Text
+	}
+	return stripDisplaySnippet(p.Snippet)
+}
+
+func stripDisplaySnippet(s string) string {
+	s = strings.ReplaceAll(s, "<mark>", "")
+	s = strings.ReplaceAll(s, "</mark>", "")
+	return html.UnescapeString(s)
+}
+
+func evidenceSpan(p domain.SearchResult) string {
+	if p.StartOffset != nil && p.EndOffset != nil {
+		return fmt.Sprintf("doc:%s:p:%d:bytes:%d-%d", p.DocumentID, p.PassageID, *p.StartOffset, *p.EndOffset)
+	}
+	return fmt.Sprintf("doc:%s:p:%d", p.DocumentID, p.PassageID)
+}
+
+// atomicStatement nomeia cada recurso exigido. Não apresenta a consulta inteira
+// como procedimento já documentado.
+func atomicStatement(req TargetRequirements, query string) string {
+	if len(req.Features) == 0 {
+		return fmt.Sprintf("Proposição não decomposta e não certificada: %s", query)
+	}
+	scope := strings.TrimSpace(strings.Join([]string{req.Vendor, req.Model, req.Firmware}, " "))
+	parts := make([]string, 0, len(req.Features))
+	for _, feature := range req.Features {
+		if scope == "" {
+			parts = append(parts, feature)
+			continue
+		}
+		parts = append(parts, scope+" / "+feature)
+	}
+	if len(parts) == 1 {
+		return "Proposição atômica, ainda sujeita ao trecho citado: " + parts[0]
+	}
+	return "Proposição composta, não certificada por menção parcial: " + strings.Join(parts, "; ")
+}
+
 // assertsContent informa se o trecho afirma algo (comando CLI ou frase de
 // suporte/procedimento), em vez de apenas conter as palavras da consulta.
 func assertsContent(lowerSnippet string, hasCLI bool) bool {
@@ -274,140 +325,183 @@ func (e *Engine) BuildClaimsFromPassages(campaignID string, query string, passag
 	var claims []domain.Claim
 	req := ParseRequirements(query)
 	claimsByKey := make(map[string]*domain.Claim)
-
-	for _, p := range passages {
-		classification := classifier.Classify(p.Snippet, p.Domain)
-
-		// Fabricante da passagem: prioriza o fabricante requerido quando verificado,
-		// evitando que um fabricante secundário citado no texto sequestre o sujeito.
-		vendorName := req.Vendor
-		if vendorName == "" && len(classification.Vendors) > 0 {
-			vendorName = classification.Vendors[0].Name
+	atoms := []TargetRequirements{req}
+	if len(req.Features) > 1 {
+		atoms = make([]TargetRequirements, 0, len(req.Features))
+		for _, feature := range req.Features {
+			atom := req
+			atom.Features = []string{feature}
+			atom.Feature = feature
+			atoms = append(atoms, atom)
 		}
+	}
 
-		// Avaliação oracional vinculando sujeito (fabricante/modelo/firmware),
-		// predicado (afirmação/negação) e objeto (recursos pedidos).
-		assertion := analyzePassage(p.Snippet, req, classification.CLICommands)
-		vendorMatch := assertion.VendorMatch
-		modelMatch := assertion.ModelMatch
-		firmwareMatch := assertion.FirmwareMatch
-		featureMatch := assertion.CoAsserted || assertion.Refuted
+	for _, atom := range atoms {
+		for _, p := range passages {
+			text := canonicalPassage(p)
+			classification := classifier.Classify(text, p.Domain)
 
-		// Se a consulta exige fabricante/firmware e a oração assertiva/refutativa
-		// não pertence a ele, a passagem é apenas menção fora de escopo.
-		vendorMismatch := len(req.Vendors) > 0 && !vendorMatch
-		versionMismatch := false
-		lowerSnippet := strings.ToLower(p.Snippet)
-		for _, fw := range req.Firmwares {
-			if mentionsConflictingFirmware(lowerSnippet, fw) && !firmwareMatch {
-				versionMismatch = true
+			// Fabricante da passagem: prioriza o fabricante requerido quando verificado,
+			// evitando que um fabricante secundário citado no texto sequestre o sujeito.
+			vendorName := req.Vendor
+			if vendorName == "" && len(classification.Vendors) > 0 {
+				vendorName = classification.Vendors[0].Name
 			}
-		}
 
-		stance := "mentions"
-		switch {
-		case vendorMismatch || versionMismatch:
-			stance = "mentions"
-		case assertion.Conflicted:
-			// Conflito explícito dentro do próprio trecho: registra a contestação,
-			// mas sem permitir que vire incompatibilidade unilateral.
-			stance = "refutes"
-			modelMatch = false
-			firmwareMatch = false
-		case assertion.Refuted:
-			stance = "refutes"
-		case assertion.CoAsserted:
-			stance = "supports"
-		}
+			// Avaliação oracional vinculando sujeito (fabricante/modelo/firmware),
+			// predicado (afirmação/negação) e objeto (recursos pedidos).
+			assertion := analyzePassage(text, atom, classification.CLICommands)
+			vendorMatch := assertion.VendorMatch
+			modelMatch := assertion.ModelMatch
+			firmwareMatch := assertion.FirmwareMatch
+			featureMatch := assertion.CoAsserted || assertion.Refuted
 
-		// Identifica o tópico atômico do claim de forma consistente por consulta,
-		// garantindo que evidências de suporte e refutação da mesma consulta sejam
-		// confrontadas no mesmo claim.
-		claimTitle := query
-		claimStatement := fmt.Sprintf("Procedimento e diretrizes documentadas para %s", query)
-		if vendorName != "" {
-			claimTitle = fmt.Sprintf("%s — %s", vendorName, query)
-		}
-		if query == "" && len(classification.CLICommands) > 0 {
-			firstCmd := classification.CLICommands[0]
-			claimTitle = fmt.Sprintf("Configuração CLI: %s", firstCmd)
-			claimStatement = fmt.Sprintf("Comandos CLI citados nas fontes para o contexto %s (não validados)", vendorName)
-		}
-
-		claimKey := claimTitle
-		claim, exists := claimsByKey[claimKey]
-		if !exists {
-			claim = &domain.Claim{
-				ID:                    fmt.Sprintf("claim-%d", len(claimsByKey)+1),
-				CampaignID:            campaignID,
-				Title:                 claimTitle,
-				Statement:             claimStatement,
-				VendorName:            vendorName,
-				Status:                "unconfirmed",
-				Applicability:         "indeterminate",
-				OperationalValidation: "untested",
-				Evidences:             []domain.Evidence{},
+			// Se a consulta exige fabricante/firmware e a oração assertiva/refutativa
+			// não pertence a ele, a passagem é apenas menção fora de escopo.
+			vendorMismatch := len(atom.Vendors) > 0 && !vendorMatch
+			versionMismatch := false
+			lowerSnippet := strings.ToLower(text)
+			for _, fw := range atom.Firmwares {
+				if mentionsConflictingFirmware(lowerSnippet, fw) && !firmwareMatch {
+					versionMismatch = true
+				}
 			}
-			claimsByKey[claimKey] = claim
-		}
 
-		// Registra fingerprint no cluster tracker
-		fp := Fingerprint(p.Snippet)
-		e.tracker.Add(fp, p.Domain)
-		clusterID := fp
+			stance := "mentions"
+			switch {
+			case vendorMismatch || versionMismatch:
+				stance = "mentions"
+			case assertion.Conflicted:
+				// Conflito explícito dentro do próprio trecho: registra a contestação,
+				// mas sem permitir que vire incompatibilidade unilateral.
+				stance = "refutes"
+				modelMatch = false
+				firmwareMatch = false
+			case assertion.Refuted:
+				stance = "refutes"
+			case assertion.CoAsserted:
+				stance = "supports"
+			}
 
-		// Cálculo dinâmico de confiança
-		var confidence float32 = 0.20
-		if classification.IsOfficialDoc {
-			confidence += 0.35
-		}
-		if featureMatch {
-			confidence += 0.25
-		}
-		if vendorMatch || (firmwareMatch && len(req.Firmwares) > 0) {
-			confidence += 0.20
-		}
-		if stance == "refutes" {
-			confidence = 0.85 // Alta confiança no relato de incompatibilidade/depreciação
-		} else if !featureMatch {
-			confidence = 0.15 // Baixa confiança se feature não for compatível
-		}
-		if confidence > 1.0 {
-			confidence = 1.0
-		}
+			// Identifica o tópico atômico do claim de forma consistente por consulta,
+			// garantindo que evidências de suporte e refutação da mesma consulta sejam
+			// confrontadas no mesmo claim.
+			claimTitle := query
+			claimStatement := atomicStatement(atom, query)
+			if len(req.Features) > 1 {
+				claimTitle = atom.Feature
+			}
+			if vendorName != "" {
+				claimTitle = fmt.Sprintf("%s — %s", vendorName, claimTitle)
+			}
+			if query == "" && len(classification.CLICommands) > 0 {
+				firstCmd := classification.CLICommands[0]
+				claimTitle = fmt.Sprintf("Configuração CLI: %s", firstCmd)
+				claimStatement = fmt.Sprintf("Comandos CLI citados nas fontes para o contexto %s (não validados)", vendorName)
+			}
 
-		notes := fmt.Sprintf("Fonte: %s (SHA-256: %s)", p.Domain, p.SHA256)
-		if firmwareMatch {
-			notes += " | firmware verificado"
-		}
-		if modelMatch {
-			notes += " | modelo correspondente"
-		}
+			claimKey := claimTitle
+			claim, exists := claimsByKey[claimKey]
+			if !exists {
+				claim = &domain.Claim{
+					ID:                    fmt.Sprintf("claim-%d", len(claimsByKey)+1),
+					CampaignID:            campaignID,
+					Title:                 claimTitle,
+					Statement:             claimStatement,
+					VendorName:            vendorName,
+					Status:                "unconfirmed",
+					Applicability:         "indeterminate",
+					OperationalValidation: "untested",
+					Evidences:             []domain.Evidence{},
+				}
+				claimsByKey[claimKey] = claim
+			}
 
-		ev := domain.Evidence{
-			ID:            fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
-			ClaimID:       claim.ID,
-			DocumentID:    p.DocumentID,
-			PassageID:     &p.PassageID,
-			ClusterID:     &clusterID,
-			Stance:        stance,
-			Excerpt:       p.Snippet,
-			Page:          p.Page,
-			Confidence:    confidence,
-			IsOfficialDoc: classification.IsOfficialDoc,
-			Notes:         notes,
-			VendorMatch:   vendorMatch,
-			ModelMatch:    modelMatch,
-			FirmwareMatch: firmwareMatch,
-			FeatureMatch:  featureMatch,
-			SourceSpan:    fmt.Sprintf("doc:%s:p:%d", p.DocumentID, p.PassageID),
+			// Registra fingerprint no cluster tracker
+			fp := Fingerprint(text)
+			e.tracker.Add(fp, p.Domain)
+			clusterID := fp
+
+			// Cálculo dinâmico de confiança
+			var confidence float32 = 0.20
+			if classification.IsOfficialDoc {
+				confidence += 0.35
+			}
+			if featureMatch {
+				confidence += 0.25
+			}
+			if vendorMatch || (firmwareMatch && len(atom.Firmwares) > 0) {
+				confidence += 0.20
+			}
+			if stance == "refutes" {
+				confidence = 0.85 // Alta confiança no relato de incompatibilidade/depreciação
+			} else if !featureMatch {
+				confidence = 0.15 // Baixa confiança se feature não for compatível
+			}
+			if confidence > 1.0 {
+				confidence = 1.0
+			}
+
+			notes := fmt.Sprintf("Fonte: %s (SHA-256: %s)", p.Domain, p.SHA256)
+			if firmwareMatch {
+				notes += " | firmware verificado"
+			}
+			if modelMatch {
+				notes += " | modelo correspondente"
+			}
+			if assertion.Speech != "" && assertion.Speech != "assertive" {
+				notes += " | ato de fala: " + assertion.Speech
+			}
+
+			ev := domain.Evidence{
+				ID:            fmt.Sprintf("ev-%d", len(claim.Evidences)+1),
+				ClaimID:       claim.ID,
+				DocumentID:    p.DocumentID,
+				PassageID:     &p.PassageID,
+				ClusterID:     &clusterID,
+				Stance:        stance,
+				Excerpt:       text,
+				Page:          p.Page,
+				Confidence:    confidence,
+				IsOfficialDoc: classification.IsOfficialDoc,
+				Notes:         notes,
+				VendorMatch:   vendorMatch,
+				ModelMatch:    modelMatch,
+				FirmwareMatch: firmwareMatch,
+				FeatureMatch:  featureMatch,
+				SourceSpan:    evidenceSpan(p),
+			}
+			claim.Evidences = append(claim.Evidences, ev)
 		}
-		claim.Evidences = append(claim.Evidences, ev)
 	}
 
 	for _, claim := range claimsByKey {
 		e.ResolveClaimStatus(claim, claim.Evidences)
 		claims = append(claims, *claim)
+	}
+	if len(req.Features) > 1 {
+		compound := domain.Claim{
+			ID: fmt.Sprintf("claim-%d", len(claims)+1), CampaignID: campaignID, Title: query,
+			Statement: atomicStatement(req, query), VendorName: req.Vendor, Status: "unconfirmed",
+			Applicability: "indeterminate", OperationalValidation: "untested",
+		}
+		if req.Vendor != "" {
+			compound.Title = req.Vendor + " — " + query
+		}
+		joint := false
+		for _, p := range passages {
+			text := canonicalPassage(p)
+			cmds := classifier.Classify(text, p.Domain).CLICommands
+			assertion := analyzePassage(text, req, cmds)
+			if assertion.CoAsserted && !assertion.Conflicted && !assertion.Refuted {
+				joint = true
+			}
+		}
+		if joint {
+			compound.Status = "sustained"
+			compound.Applicability = documentaryApplicability(&compound)
+		}
+		claims = append(claims, compound)
 	}
 	return claims
 }

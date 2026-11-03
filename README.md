@@ -32,11 +32,11 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 | **Priorização da fronteira** (P1-05) | Testado (unidade) | `computeFrontierPriority`: termos da campanha antes, páginas de ruído (login, share…) depois |
 | **Origin clustering** (P1-06) | Testado com PostgreSQL 16 | Fingerprint de conteúdo persistido em `origin_clusters`; evidências gravam `cluster_id`, que sobrevive ao recarregamento. Fingerprint idêntico = 1 origem; independência real de autoria não é inferida |
 | **Ciclo adaptativo de pistas** | Implementado e testado com descoberta HTTP controlada; sem E2E público | Fila ociosa agenda avaliação persistente. Lacunas de claims geram buscas primeiro; quando elas fecham, a rodada envia subperguntas determinísticas ainda não pesquisadas (`PlanSubquestions`, sem LLM no ciclo). Cobertura por termos no mesmo trecho não certifica a resposta. Histórico em `/api/campaigns/{id}/rounds` e subperguntas em `/api/campaigns/{id}/questions`. |
-| **Git Eye** (P1-07) | Parcial | Varredura local com proveniência verdadeira: `Revision` só é um SHA se o trecho existe no blob daquele commit; alteração não commitada ou arquivo não rastreado vem como `working_tree`/`uncommitted`/`dirty` com `base_revision`. Busca de repositórios e READMEs no GitHub; sem busca por conteúdo remoto, GitLab ou Zoekt |
+| **Git Eye** (P1-07) | Parcial | Varredura local com proveniência verdadeira: `Revision` só é um SHA se o trecho existe no blob daquele commit. GitHub e GitLab consultam metadados, README e um arquivo por ref; Zoekt só consulta um índice já existente. Não há busca global do código remoto |
 | **Claims idempotentes** | Testado com PostgreSQL 16 | Índice único (campanha, título). A migração 0006 **mescla** duplicatas antigas no claim validado (ou no mais antigo): evidências e contradições são movidas, nada é apagado, e cada fusão fica em `claim_merges`. Upsert seguro sob concorrência; claims com validação operacional são imutáveis |
 | **robots.txt** | Testado (unidade + servidor local) | RFC 9309: robots.txt inalcançável bloqueia por 1 min; 404/410 libera; 5xx bloqueia. Cada redirecionamento é conferido contra o robots.txt do destino; o redirecionamento do próprio robots.txt não reentra na verificação |
 | **Orçamento de bytes** | Testado com PostgreSQL 16 | Reserva atômica no PostgreSQL (`byte_reservations`) antes de cada download: 12 reservas simultâneas nunca excedem o saldo. O teto concedido é aplicado em todos os executores, inclusive o nativo. Reservas expiram se o worker cair; saldo ocupado adia o job em vez de descartá-lo |
-| **Original preservado sem texto** | Testado com PostgreSQL 16 | Documento sem texto extraível vai para o CAS como `extraction_pending`; uma extração posterior do mesmo SHA-256 preenche texto e trechos sem nova coleta. Reprocessar com outro motor um documento que já tem trechos (versões de extração) ainda não é suportado. OCR/Docling não existem |
+| **Original preservado sem texto** | Testado com PostgreSQL 16 e 18 | O original fica no CAS. Extrações são versionadas; a busca usa a extração ativa. OCR com Poppler/Tesseract é opcional e foi ensaiado com PDF sintético. Docling e Tika só entram por comando externo, sem avaliação em manuais reais |
 | **Orçamento de pesquisas** | Testado com PostgreSQL 16 | Pesquisas externas (máx. 50 por campanha) não consomem `max_urls`, que conta só downloads |
 | **Recuperação para o dossiê** | Testado (unidade) | A pergunta é decomposta em consultas curtas (fabricante, modelo, firmware, recurso) e os resultados são fundidos; recall@k nunca foi medido |
 | **Tipos de aresta** | Testado com PostgreSQL 16 | Arestas `sitemap` e `feed` são preservadas no grafo |
@@ -45,8 +45,8 @@ página (quando PDF) e o hash SHA-256 do conteúdo armazenado.
 | **Arquitetura genérica** (ADR-009) | Parcial | Descoberta e dossiê funcionam fora de telecom; classificador e requisitos do motor de evidências ainda são de telecom |
 | **Benchmark de 20 perguntas** | Testado com fixtures sintéticas | Mede o avaliador, não a pesquisa real na internet |
 | **SearXNG** | Configurado | `config/searxng/settings.yml` (JSON); resultados reais não testados |
-| **OCR** | Não integrado | `internal/extract/ocr.go` existe, mas o pipeline não o chama |
-| **Busca semântica (pgvector)** | Planejado | Hoje: exata + FTS `tsvector` + `pg_trgm` |
+| **OCR** | Opcional, desligado por padrão | Poppler/Tesseract no worker e em `POST /reprocess?parser=ocr`. Não é sandbox de parser nem avaliação de manuais reais |
+| **Busca semântica (pgvector)** | Opcional | `NIE_PGVECTOR` cria a extensão e a tabela. A busca em produção continua lexical; não há gerador de embeddings |
 
 Decisões de arquitetura vigentes: [`docs/DECISOES.md`](docs/DECISOES.md).
 
@@ -64,7 +64,7 @@ Decisões de arquitetura vigentes: [`docs/DECISOES.md`](docs/DECISOES.md).
 - **Motor de Evidências Epistemológico** estruturado (`sustained`, `corroborated`, `contested`, `documented`, `unconfirmed`) com verificação atômica de requisitos.
 - **Investigação com IA & Dossiê Técnico** estruturado (matriz de compatibilidade, comandos CLI com proveniência, rollback e checklist).
 - **Busca Híbrida** exata (preserva pontuação de CLI), lexical (`tsvector`), trigramas (`pg_trgm`) e busca em Git local com hash de commit.
-- **Agendamentos** de campanhas (a detecção de mudança em documentos ainda não está ligada ao fluxo).
+- **Agendamentos** de campanhas. A revisita por hash existe e fica desligada até `NIE_REVISIT_INTERVAL` ser maior que zero.
 - **Painel Svelte moderno** embutido diretamente no binário Go.
 - **Docker Compose** pronto para subir com PostgreSQL 18 e aplicação.
 
@@ -199,7 +199,8 @@ Todas as variáveis são opcionais; os padrões funcionam para uso local.
 | `NIE_SEARXNG_URL` | vazio | URL do SearXNG para descoberta web |
 | `NIE_GITHUB_ENABLED` | `false` | Habilita descoberta via GitHub |
 | `NIE_GITHUB_TOKEN` | vazio | Token para elevar rate limit do GitHub |
-| `NIE_API_TOKEN` | vazio | Se definido, exige `X-API-Token` ou `Bearer` nas rotas `/api/` privadas |
+| `NIE_API_TOKEN` | vazio | Se definido, exige `X-API-Token` ou `Bearer` nas rotas `/api/` privadas. O perfil Compose `edge` recusa subir sem este valor |
+| `NIE_PUBLIC_EXPOSURE` | `false` | Com `true`, o processo não inicia se `NIE_API_TOKEN` estiver vazio |
 | `NIE_WEB_DIR` | vazio | Diretório alternativo para o SPA em desenvolvimento |
 | `NIE_USER_AGENT` | `NIEBot/0.1 (+https://localhost)` | User-Agent e token de `robots.txt` |
 | `NIE_LOG_LEVEL` | `info` | `debug`, `info`, `warn` ou `error` |

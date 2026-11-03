@@ -135,7 +135,10 @@ type SearchResult struct {
 	Domain          string    `json:"domain"`
 	Page            *int      `json:"page,omitempty"`
 	Ordinal         int       `json:"ordinal"`
+	Text            string    `json:"text,omitempty"`
 	Snippet         string    `json:"snippet"`
+	StartOffset     *int      `json:"start_offset,omitempty"`
+	EndOffset       *int      `json:"end_offset,omitempty"`
 	Match           string    `json:"match"`
 	Score           float64   `json:"score"`
 	FetchedAt       time.Time `json:"fetched_at"`

@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"strings"
 	"testing"
 
 	"nie/internal/domain"
@@ -77,8 +78,8 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 			Notes:         "Fonte: huawei.com",
 		},
 	})
-	if c2.Status != "sustained" || c2.Applicability != "applicable" {
-		t.Errorf("Manual oficial com firmware verificado deve ser sustained/applicable, obteve %s/%s", c2.Status, c2.Applicability)
+	if c2.Status != "sustained" || c2.Applicability != "indeterminate" {
+		t.Errorf("manual oficial escopado sem laboratório deve ser sustained/indeterminate, obteve %s/%s", c2.Status, c2.Applicability)
 	}
 
 	// Adversarial Case 3: Três documentos copiando o MESMO artigo (mesmo fingerprint)
@@ -120,8 +121,8 @@ func TestResolveClaimStatusAdversarial(t *testing.T) {
 			Notes:         "Fonte: bbr.org",
 		},
 	})
-	if c4.Status != "corroborated" || c4.Applicability != "applicable" {
-		t.Errorf("Duas origens independentes com firmware verificado devem ser corroborated/applicable, obteve %s/%s", c4.Status, c4.Applicability)
+	if c4.Status != "corroborated" || c4.Applicability != "indeterminate" {
+		t.Errorf("duas origens escopadas sem laboratório devem ser corroborated/indeterminate, obteve %s/%s", c4.Status, c4.Applicability)
 	}
 
 	// Case 5: refutação que trata do mesmo fabricante, modelo, firmware e recurso
@@ -237,13 +238,14 @@ func TestP001_CompoundRequirementsNotCollapsed(t *testing.T) {
 
 	claims := eng.BuildClaimsFromPassages("camp-compound", query, passages)
 	for _, c := range claims {
-		if c.Applicability == "applicable" {
-			t.Errorf("Passagem parcial (apenas BGP) para consulta composta (BGP+RADIUS+PPPoE) não pode ser applicable: %+v", c)
+		if c.Applicability == "applicable" || c.Status == "sustained" {
+			t.Errorf("passagem só de BGP não sustenta a consulta composta: %+v", c)
 		}
-		// A evidência gerada deve registrar feature_match = false
-		for _, ev := range c.Evidences {
-			if ev.FeatureMatch {
-				t.Errorf("Evidência incompleta não deveria ter feature_match = true para consulta com múltiplos requisitos: %+v", ev)
+		if strings.Contains(c.Title, "RADIUS") || strings.Contains(c.Title, "PPPOE") {
+			for _, ev := range c.Evidences {
+				if ev.FeatureMatch && ev.Stance == "supports" {
+					t.Errorf("RADIUS ou PPPoE não foram afirmados: %+v", ev)
+				}
 			}
 		}
 	}

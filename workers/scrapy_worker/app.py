@@ -182,6 +182,7 @@ def crawl(req: CrawlRequest):
             if not loc:
                 break
             curr_url = urljoin(curr_url, loc)
+            validate_public_target(curr_url)
             continue
         break
 

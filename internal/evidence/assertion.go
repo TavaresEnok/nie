@@ -48,6 +48,9 @@ type passageAssertion struct {
 	VendorMatch   bool
 	ModelMatch    bool
 	FirmwareMatch bool
+	// Speech registra quando a oração não é uma afirmação: question, hypothesis,
+	// nonfactive ou falsity. Vazio significa que nenhuma oração relevante foi bloqueada.
+	Speech string
 }
 
 var allKnownVendors = []struct {
@@ -524,6 +527,34 @@ func analyzePassage(snippet string, req TargetRequirements, cliCommands []string
 				}
 			}
 			if !mentionsAny {
+				continue
+			}
+
+			// Pergunta, hipótese e relato não factivo não sustentam nem refutam.
+			// Uma matriz que declara a frase falsa refuta o recurso embutido.
+			// Conflito explícito continua no caminho anterior: "whether" aqui
+			// não transforma a divergência em hipótese ignorada.
+			speech := classifySpeech(snippet, clause)
+			if conflictMarkerRE.MatchString(lowerClause) {
+				speech = speechAssertive
+			}
+			switch speech {
+			case speechQuestion, speechHypothesis, speechNonFactive, speechFalsity:
+				if a.Speech == "" {
+					a.Speech = speech.String()
+				}
+				if speech == speechFalsity {
+					a.Refuted = true
+					if segVendorOK {
+						a.VendorMatch = true
+					}
+					if segModelOK {
+						a.ModelMatch = true
+					}
+					if segFirmwareOK {
+						a.FirmwareMatch = true
+					}
+				}
 				continue
 			}
 

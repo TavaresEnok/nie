@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -9,13 +10,14 @@ import (
 
 // Config reúne parâmetros de implantação. Ajustes de campanha ficam na API/UI.
 type Config struct {
-	Addr        string
-	DatabaseURL string
-	DataDir     string
-	WebDir      string
-	APIToken    string
-	UserAgent   string
-	LogLevel    string
+	Addr           string
+	DatabaseURL    string
+	DataDir        string
+	WebDir         string
+	APIToken       string
+	PublicExposure bool
+	UserAgent      string
+	LogLevel       string
 
 	WorkerEnabled bool
 	WorkerCount   int
@@ -42,8 +44,12 @@ type Config struct {
 	TikaCommand        string
 	DoclingCommand     string
 	ArchiveBoxDir      string
+	ArchiveBoxProxy    string
 	GPTResearcherURL   string
 	PGVector           bool
+	EmbedURL           string
+	EmbedModel         string
+	EmbedAPIKey        string
 
 	// Fase 2 e 3: IA, Autonomia e Git Local
 	AIProvider        string
@@ -81,6 +87,7 @@ func Load() Config {
 		DataDir:                  env("NIE_DATA_DIR", "./data"),
 		WebDir:                   env("NIE_WEB_DIR", ""),
 		APIToken:                 env("NIE_API_TOKEN", ""),
+		PublicExposure:           envBool("NIE_PUBLIC_EXPOSURE", false),
 		UserAgent:                env("NIE_USER_AGENT", "NIEBot/0.1 (+https://localhost)"),
 		LogLevel:                 strings.ToLower(env("NIE_LOG_LEVEL", "info")),
 		WorkerEnabled:            envBool("NIE_WORKER", true),
@@ -107,8 +114,12 @@ func Load() Config {
 		TikaCommand:              env("NIE_TIKA_COMMAND", ""),
 		DoclingCommand:           env("NIE_DOCLING_COMMAND", ""),
 		ArchiveBoxDir:            env("NIE_ARCHIVEBOX_DIR", ""),
+		ArchiveBoxProxy:          env("NIE_ARCHIVEBOX_PROXY", ""),
 		GPTResearcherURL:         strings.TrimRight(env("NIE_GPT_RESEARCHER_URL", ""), "/"),
 		PGVector:                 envBool("NIE_PGVECTOR", false),
+		EmbedURL:                 env("NIE_EMBED_URL", ""),
+		EmbedModel:               env("NIE_EMBED_MODEL", "nomic-embed-text"),
+		EmbedAPIKey:              env("NIE_EMBED_API_KEY", ""),
 		AIProvider:               strings.ToLower(env("NIE_AI_PROVIDER", "none")),
 		AIBaseURL:                env("NIE_AI_BASE_URL", ""),
 		AIAPIKey:                 env("NIE_AI_API_KEY", ""),
@@ -130,6 +141,15 @@ func Load() Config {
 		OCRTimeout:               envDuration("NIE_OCR_TIMEOUT", 45*time.Second),
 		RevisitInterval:          envDuration("NIE_REVISIT_INTERVAL", 0),
 	}
+}
+
+// Validate recusa publicação externa sem token. O bind local continua aceitando
+// token vazio; NIE_PUBLIC_EXPOSURE é o interruptor do perfil que sai do loopback.
+func (c Config) Validate() error {
+	if c.PublicExposure && strings.TrimSpace(c.APIToken) == "" {
+		return errors.New("NIE_PUBLIC_EXPOSURE exige NIE_API_TOKEN; a API pública não sobe sem autenticação")
+	}
+	return nil
 }
 
 func (c Config) DomainInterval() time.Duration {

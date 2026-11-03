@@ -70,3 +70,23 @@ func RetrievePassages(ctx context.Context, st *store.Store, question, campaignID
 	}
 	return merged, nil
 }
+
+// MergePassages acrescenta trechos ainda não vistos, preservando a ordem da primeira lista.
+func MergePassages(base, extra []domain.SearchResult, limit int) []domain.SearchResult {
+	seen := make(map[int64]bool, len(base))
+	out := append([]domain.SearchResult{}, base...)
+	for _, item := range base {
+		seen[item.PassageID] = true
+	}
+	for _, item := range extra {
+		if item.PassageID == 0 || seen[item.PassageID] {
+			continue
+		}
+		seen[item.PassageID] = true
+		out = append(out, item)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}

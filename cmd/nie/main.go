@@ -25,6 +25,10 @@ import (
 func main() {
 	cfg := config.Load()
 	logger := newLogger(cfg.LogLevel)
+	if err := cfg.Validate(); err != nil {
+		logger.Error("configuração recusada", "err", err)
+		os.Exit(1)
+	}
 	logger.Info("iniciando NIE", "version", version.Version, "addr", cfg.Addr, "data", cfg.DataDir, "workers", cfg.WorkerCount)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

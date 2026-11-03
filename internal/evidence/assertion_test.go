@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"strings"
 	"testing"
 
 	"nie/internal/domain"
@@ -81,7 +82,29 @@ func TestLabeledStanceDataset(t *testing.T) {
 	for _, tc := range cases {
 		ps := []domain.SearchResult{{PassageID: 1, DocumentID: "d", Domain: "support.huawei.com", Snippet: tc.snippet, SHA256: "h"}}
 		cs := NewEngine().BuildClaimsFromPassages("camp", tc.query, ps)
-		if len(cs) == 0 || len(cs[0].Evidences) == 0 {
+		if len(cs) == 0 {
+			t.Fatalf("sem claim para %q", tc.snippet)
+		}
+		if strings.Contains(tc.query, "PPPoE") {
+			var joint *domain.Claim
+			for i := range cs {
+				if strings.Contains(cs[i].Statement, "BGP") && strings.Contains(cs[i].Statement, "PPPOE") {
+					joint = &cs[i]
+				}
+			}
+			if joint == nil {
+				t.Fatalf("sem proposição conjunta para %q", tc.snippet)
+			}
+			got := "mentions"
+			if joint.Status == "sustained" || joint.Status == "corroborated" {
+				got = "supports"
+			}
+			if got != tc.wantStance {
+				t.Errorf("%q / %q: conjunto = %s, quer %s", tc.query, tc.snippet, got, tc.wantStance)
+			}
+			continue
+		}
+		if len(cs[0].Evidences) == 0 {
 			t.Fatalf("sem evidência para %q", tc.snippet)
 		}
 		if got := cs[0].Evidences[0].Stance; got != tc.wantStance {

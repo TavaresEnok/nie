@@ -22,6 +22,7 @@ import (
 	"nie/internal/evidence"
 	"nie/internal/extract"
 	"nie/internal/research"
+	"nie/internal/semantic"
 	"nie/internal/storage"
 	"nie/internal/store"
 	"nie/internal/urlutil"
@@ -35,15 +36,18 @@ type Worker struct {
 	robots  interface {
 		Allowed(context.Context, *url.URL) bool
 	}
-	searx   *discovery.SearXNG
-	github  *discovery.GitHub
-	gitlab  *discovery.GitLab
-	mwmbl   *discovery.Mwmbl
-	wayback *discovery.WaybackMachine
-	swh     *discovery.SoftwareHeritage
-	crawl   *discovery.CommonCrawl
-	cfg     config.Config
-	logger  *slog.Logger
+	searx      *discovery.SearXNG
+	github     *discovery.GitHub
+	gitlab     *discovery.GitLab
+	mwmbl      *discovery.Mwmbl
+	wayback    *discovery.WaybackMachine
+	swh        *discovery.SoftwareHeritage
+	crawl      *discovery.CommonCrawl
+	zoekt      *discovery.Zoekt
+	openSearch *discovery.OpenSearch
+	embed      *semantic.Client
+	cfg        config.Config
+	logger     *slog.Logger
 }
 
 var errDeferred = errors.New("job adiado")
@@ -108,20 +112,23 @@ func New(st *store.Store, storage *storage.Store, fetcher *crawler.Fetcher, robo
 	}
 
 	return &Worker{
-		store:   st,
-		storage: storage,
-		fetcher: fetcher,
-		router:  router,
-		robots:  robots,
-		searx:   searx,
-		github:  github,
-		gitlab:  gitlab,
-		mwmbl:   mwmbl,
-		wayback: wayback,
-		swh:     swh,
-		crawl:   crawl,
-		cfg:     cfg,
-		logger:  logger,
+		store:      st,
+		storage:    storage,
+		fetcher:    fetcher,
+		router:     router,
+		robots:     robots,
+		searx:      searx,
+		github:     github,
+		gitlab:     gitlab,
+		mwmbl:      mwmbl,
+		wayback:    wayback,
+		swh:        swh,
+		crawl:      crawl,
+		zoekt:      discovery.NewZoekt(cfg.ZoektURL),
+		openSearch: discovery.NewOpenSearch(cfg.OpenSearchURL, cfg.OpenSearchIndex, cfg.OpenSearchUser, cfg.OpenSearchPassword),
+		embed:      semantic.New(cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey),
+		cfg:        cfg,
+		logger:     logger,
 	}
 }
 
@@ -307,6 +314,21 @@ func (w *Worker) processResearch(ctx context.Context, job *domain.Job) error {
 	if err != nil {
 		return err
 	}
+	if w.embed != nil && w.cfg.PGVector {
+		if vec, err := w.embed.Embed(ctx, camp.Query); err != nil {
+			w.logger.Warn("busca semântica indisponível", "err", err)
+		} else if similar, err := w.store.SearchSimilar(ctx, camp.ID, vec, 30); err != nil {
+			w.logger.Warn("pgvector", "err", err)
+		} else {
+			passages = research.MergePassages(passages, similar, 100)
+		}
+	}
+	if neighbors, err := w.store.NeighborPassages(ctx, camp.ID, passageURLs(passages), 30); err != nil {
+		w.logger.Warn("vizinhos da árvore", "err", err)
+	} else {
+		passages = research.MergePassages(passages, neighbors, 100)
+	}
+	w.enqueueExternalIndexes(ctx, camp.ID, camp.Query)
 	claims := evidence.NewEngine().BuildClaimsFromPassages(camp.ID, camp.Query, passages)
 	if err := w.store.SaveClaims(ctx, claims); err != nil {
 		return err
@@ -604,13 +626,11 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 		w.logger.Info("documento alterado", "url", finalNorm, "anterior", saved.PreviousSHA, "atual", stored.SHA256)
 	}
 	w.logger.Info("documento processado", "url", finalNorm, "doc", saved.ID, "sha256", stored.SHA256, "created", saved.Created, "passages", len(passages), "bytes", stored.Size)
+	w.indexEmbeddings(ctx, saved.ID)
 
 	if job.Depth < budget.MaxDepth {
 		enqueued := 0
-		linksToFollow := ex.Links
-		if len(linksToFollow) == 0 {
-			linksToFollow = fetchResult.ExtractedLinks
-		}
+		linksToFollow := mergeLinks(ex.Links, fetchResult.ExtractedLinks)
 		linkKind := "link"
 		if ex.LinkKind != "" {
 			linkKind = ex.LinkKind
@@ -643,10 +663,8 @@ func (w *Worker) processFetch(ctx context.Context, job *domain.Job) error {
 			for _, mention := range mentions {
 				_ = w.store.RecordDiscoveryEdge(ctx, job.CampaignID, finalNorm, "mention:"+mention, "mention", "menção técnica não linkada", job.Depth+1)
 				if isSearchableMention(mention) {
-					if w.searx != nil {
-						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_web", mention)
-					} else if w.mwmbl != nil {
-						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, "discover_mwmbl", mention)
+					for _, kind := range w.discoveryKinds() {
+						_, _ = w.store.EnqueueDiscovery(ctx, job.CampaignID, kind, mention)
 					}
 				}
 			}
@@ -1055,4 +1073,122 @@ func isSearchableMention(m string) bool {
 		}
 	}
 	return false
+}
+
+func (w *Worker) discoveryKinds() []string {
+	var kinds []string
+	if w.searx != nil {
+		kinds = append(kinds, "discover_web")
+	}
+	if w.mwmbl != nil {
+		kinds = append(kinds, "discover_mwmbl")
+	}
+	if w.github != nil {
+		kinds = append(kinds, "discover_github")
+	}
+	if w.gitlab != nil {
+		kinds = append(kinds, "discover_gitlab")
+	}
+	if w.swh != nil {
+		kinds = append(kinds, "discover_swh")
+	}
+	if w.crawl != nil {
+		kinds = append(kinds, "discover_commoncrawl")
+	}
+	return kinds
+}
+
+func (w *Worker) indexEmbeddings(ctx context.Context, documentID string) {
+	if w.embed == nil || !w.cfg.PGVector || documentID == "" {
+		return
+	}
+	passages, err := w.store.ActivePassages(ctx, documentID)
+	if err != nil {
+		w.logger.Warn("trechos para embedding", "err", err)
+		return
+	}
+	for _, passage := range passages {
+		if strings.TrimSpace(passage.Text) == "" {
+			continue
+		}
+		vec, err := w.embed.Embed(ctx, passage.Text)
+		if err != nil {
+			w.logger.Warn("embedding", "err", err)
+			return
+		}
+		if err := w.store.UpsertEmbedding(ctx, passage.ID, w.embed.Model(), vec); err != nil {
+			w.logger.Warn("gravar embedding", "err", err)
+			return
+		}
+	}
+}
+
+func (w *Worker) enqueueExternalIndexes(ctx context.Context, campaignID, query string) {
+	enqueue := func(raw, reason string) {
+		if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+			return
+		}
+		if _, err := w.store.EnqueueFetch(ctx, campaignID, raw, 0, "", reason, 25); err != nil {
+			w.logger.Warn("enfileirar índice externo", "url", raw, "err", err)
+		}
+	}
+	if w.zoekt != nil {
+		hits, err := w.zoekt.Search(ctx, query, 10)
+		if err != nil {
+			w.logger.Warn("zoekt", "err", err)
+		}
+		for _, hit := range hits {
+			enqueue(hit.Repo, "zoekt")
+		}
+	}
+	if w.openSearch != nil {
+		hits, err := w.openSearch.Search(ctx, query, 10)
+		if err != nil {
+			w.logger.Warn("opensearch", "err", err)
+		}
+		for _, hit := range hits {
+			enqueue(urlFromOpenSearch(hit.Source), "opensearch")
+		}
+	}
+}
+
+func urlFromOpenSearch(source any) string {
+	fields, ok := source.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"url", "URL", "link"} {
+		if value, ok := fields[key].(string); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func passageURLs(passages []domain.SearchResult) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, passage := range passages {
+		if passage.URL == "" || seen[passage.URL] {
+			continue
+		}
+		seen[passage.URL] = true
+		out = append(out, passage.URL)
+	}
+	return out
+}
+
+func mergeLinks(groups ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, group := range groups {
+		for _, link := range group {
+			if link == "" || seen[link] {
+				continue
+			}
+			seen[link] = true
+			out = append(out, link)
+		}
+	}
+	return out
 }

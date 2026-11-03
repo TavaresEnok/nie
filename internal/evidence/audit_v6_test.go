@@ -79,8 +79,8 @@ func TestAuditV6_NegationOfBGPNotAttributedToOSPF(t *testing.T) {
 				t.Errorf("negação de BGP foi atribuída a OSPF (%q): status=%s applicability=%s ev=%+v",
 					snippet, c.Status, c.Applicability, c.Evidences)
 			}
-			if c.Status != "sustained" || c.Applicability != "applicable" {
-				t.Errorf("suporte explícito de OSPF deveria ser sustained/applicable (%q): obteve %s/%s",
+			if c.Status != "sustained" || c.Applicability != "indeterminate" {
+				t.Errorf("suporte explícito de OSPF deveria ser sustained/indeterminate (%q): obteve %s/%s",
 					snippet, c.Status, c.Applicability)
 			}
 		}
@@ -139,8 +139,8 @@ func TestAuditV6_NegationOfPPPoENotAttributedToBGP(t *testing.T) {
 				t.Errorf("negação de PPPoE foi atribuída a BGP (%q): status=%s applicability=%s ev=%+v",
 					snippet, c.Status, c.Applicability, c.Evidences)
 			}
-			if c.Status != "sustained" || c.Applicability != "applicable" {
-				t.Errorf("suporte explícito de BGP deveria ser sustained/applicable (%q): obteve %s/%s",
+			if c.Status != "sustained" || c.Applicability != "indeterminate" {
+				t.Errorf("suporte explícito de BGP deveria ser sustained/indeterminate (%q): obteve %s/%s",
 					snippet, c.Status, c.Applicability)
 			}
 		}

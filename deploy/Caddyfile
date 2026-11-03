@@ -1,4 +1,5 @@
-# Proxy reverso opcional. O NIE continua servindo o painel e a API na porta interna.
+# Proxy reverso opcional. O Compose só inicia este processo no perfil edge
+# quando NIE_API_TOKEN está definido. O aplicativo também precisa desse token.
 :443 {
 	encode gzip
 	reverse_proxy app:8080

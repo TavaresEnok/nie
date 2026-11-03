@@ -78,6 +78,7 @@ func (s *Store) Search(ctx context.Context, q, campaignID string, limit int) ([]
 	}
 
 	for i := range exact {
+		exact[i].result.Text = exact[i].text
 		exact[i].result.Snippet = makeSnippet(exact[i].text, q)
 	}
 	if len(exact) > limit {
@@ -92,7 +93,7 @@ func (s *Store) Search(ctx context.Context, q, campaignID string, limit int) ([]
 
 const searchSelect = `
 SELECT p.id, p.document_id::text, p.extraction_run_id::text, d.title, d.mime, d.sha256, v.url, v.domain,
-       p.page, p.ordinal, p.text, v.fetched_at, %s AS score
+       p.page, p.ordinal, p.text, p.start_offset, p.end_offset, v.fetched_at, %s AS score
 FROM passages p
 JOIN documents d ON d.id = p.document_id
 JOIN LATERAL (
@@ -145,13 +146,16 @@ func (s *Store) scanSearch(ctx context.Context, match, query string, args ...any
 	for rows.Next() {
 		var r searchRow
 		var page *int
+		var start, end *int
 		var fetched time.Time
 		if err := rows.Scan(&r.result.PassageID, &r.result.DocumentID, &r.result.ExtractionRunID, &r.result.Title, &r.result.MIME,
 			&r.result.SHA256, &r.result.URL, &r.result.Domain, &page, &r.result.Ordinal,
-			&r.text, &fetched, &r.result.Score); err != nil {
+			&r.text, &start, &end, &fetched, &r.result.Score); err != nil {
 			return nil, err
 		}
 		r.result.Page = page
+		r.result.StartOffset = start
+		r.result.EndOffset = end
 		r.result.FetchedAt = fetched
 		r.result.Snippet = ""
 		r.result.Match = match
